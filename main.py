@@ -39,17 +39,14 @@ class VASTControlClass:
         # runtime socket client (None until connected)
         self.client: Optional[socket.socket] = None
     
-    def connect(self, timeout=1000):
-        self.client = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        self.client.settimeout(timeout)
-        self.client.connect((self.host, self.port))
+    def connect(self, timeout=100):
         try:
             self.client = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             self.client.settimeout(timeout)
             self.client.connect((self.host, self.port))
             return 1
-        except Exception:
-            # ensure client is None on failure
+        except Exception as e:
+            print(f"Connection failed: {e}")
             try:
                 if self.client:
                     self.client.close()
@@ -59,33 +56,69 @@ class VASTControlClass:
             return 0
     
     def disconnect(self):
-        client = self.client
-        if client is not None:
+        if self.client is not None:
             try:
-                client.close()
-            except Exception as e:
-                # log the exception or re-raise if you want callers to see it
-                raise Exception("Error closing the socket connection", e)
-                # pass
+                self.client.close()
             finally:
-                # avoid keeping a stale reference
                 self.client = None
         return 1
-       
-    def send_command(self, command: str) -> str:
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-            sock.connect((self.host, self.port))
-            payload = (command + "\n").encode("utf-8")
-            sock.sendall(payload)
-            response = sock.recv(4096)
-            return response.decode("utf-8", errors="ignore")
+        
+    def send_command(self, msg_id: int, payload: bytes = b"") -> Tuple[int, bytes]:
+        """
+        Send a binary command to the VAST API and return the message type and response bytes.
+
+        Each message follows the format:
+        [0..3]   = b"VAST"
+        [4..11]  = uint64 length of data following (payload + 4 bytes for msg_id)
+        [12..15] = uint32 message ID (little-endian)
+        [16..]   = payload (optional)
+        """
+        total_len = len(payload) + 4
+        header = b"VAST" + struct.pack("<Q", total_len) + struct.pack("<I", msg_id)
+        message = header + payload
+
+        print(f"Sending {len(message)} bytes: {message.hex()}")
+
+        client = self.client
+        if client is None:
+            raise RuntimeError("Not connected to VAST API.")
+        client.sendall(message)
+
+        hdr = client.recv(16)
+        if len(hdr) < 16 or not hdr.startswith(b"VAST"):
+            raise RuntimeError(f"Invalid response header: {hdr!r}")
+
+        total_len = struct.unpack("<Q", hdr[4:12])[0]
+        msg_type = struct.unpack("<I", hdr[12:16])[0]
+
+        # Receive payload 
+        payload_bytes = b""
+        while len(payload_bytes) < total_len - 4:
+            chunk = client.recv(4096)
+            if not chunk:
+                break
+            payload_bytes += chunk
+
+        # print(f"Response msg_type={msg_type}, len={len(payload_bytes)}")
+        return msg_type, payload_bytes
+
+
+    # [info, res] = getinfo()
+    # Reads out general information from VAST.
+    # Returns a struct with the following fields if successful, or an empty struct [] if failed:
+    def get_info(self):
+        msg_type, data = self.send_command(6)  # GETINFO = 6
+        if msg_type == 21:  # error
+            print("No segmentation or dataset loaded in VAST.")
+            return None
+        return data
 
 # Client connecting to VAST Lite API
 def main():
-    vast = VASTControlClass("127.0.0.1", 22081)
-    print(vast.connect())
-    print(vast.disconnect())
-
+    vast = VASTControlClass(HOST,PORT)
+    vast.connect()
+    print(vast.get_info())
+    vast.disconnect()
 
 if __name__ == "__main__":
     main()

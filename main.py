@@ -411,6 +411,7 @@ class VASTControlClass:
         Corresponds to MATLAB getlayerinfo(layernr).
         """
         payload = struct.pack("<I", layer_nr)
+        print(payload)
         msg_type, data = self.send_command(GETLAYERINFO, payload)
         if msg_type == 21:
             self.last_error = 21
@@ -418,6 +419,7 @@ class VASTControlClass:
             return {}
         parsed = self.parse_payload(data)
         print(parsed)
+        return parsed
 
 # import json
 def main():
@@ -428,13 +430,15 @@ def main():
     # print(f"info is a {type(info[0])} as: {info[0]}")
     # hw_info = vast.get_hardware_info()
     # print(f"hw_info is a {type(hw_info[0])} as: {hw_info[0]}")
-    # nroflayers = vast.get_number_of_layers()
-    
-    # for i in range(vast.get_number_of_layers()):
-    #     print(i, vast.get_layer_info(i).get("name"), vast.get_layer_info(i).get("type"))
-    print(vast.get_layer_info(0))
-    print(vast.get_layer_info(1))
-    print(vast.get_layer_info(2))
+    n = vast.get_number_of_layers()
+    print("Number of layers:", n)
+    # for i in range(1,n+1):
+    #     # print(i, vast.get_layer_info(i).get("name"), vast.get_layer_info(i).get("type"))
+    #     print(i)
+    #     vast.get_layer_info(i)
+    # vast.get_layer_info(1)
+    vast.get_layer_info(2)
+    vast.get_layer_info(3)
 
 
     vast.disconnect()

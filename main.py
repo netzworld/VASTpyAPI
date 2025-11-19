@@ -512,6 +512,115 @@ class VASTControlClass:
 
         return layerinfo        
 
+    def set_layer_info(self, layer_nr: int, layer_info: dict) -> bool:
+        """
+        Set information for a specific layer in VAST.
+        Corresponds to MATLAB setlayerinfo(layernr, layerinfo).
+        """
+        if not layer_info:
+            self.last_error = 0
+            return True
+        xflags = 0
+        msg = self._encode_uint32(layer_nr)
+
+        def has(key: str) -> bool:
+            return key in layer_info and layer_info[key] is not None
+        
+        # 1  editable (int32)
+        if has("editable"):
+            msg += self._encode_int32(layer_info["editable"])
+            xflags |= 1
+
+        # 2  visible (int32)
+        if has("visible"):
+            msg += self._encode_int32(layer_info["visible"])
+            xflags |= 2
+
+        # 4  brightness (int32)
+        if has("brightness"):
+            msg += self._encode_int32(layer_info["brightness"])
+            xflags |= 4
+
+        # 8  contrast (int32)
+        if has("contrast"):
+            msg += self._encode_int32(layer_info["contrast"])
+            xflags |= 8
+
+        # 16 opacitylevel (double)
+        if has("opacitylevel"):
+            msg += self._encode_double(layer_info["opacitylevel"])
+            xflags |= 16
+
+        # 32 brightnesslevel (double)
+        if has("brightnesslevel"):
+            msg += self._encode_double(layer_info["brightnesslevel"])
+            xflags |= 32
+
+        # 64 contrastlevel (double)
+        if has("contrastlevel"):
+            msg += self._encode_double(layer_info["contrastlevel"])
+            xflags |= 64
+
+        # 128 blendmode (int32)
+        if has("blendmode"):
+            msg += self._encode_int32(layer_info["blendmode"])
+            xflags |= 128
+
+        # 256 blendoradd (int32)
+        if has("blendoradd"):
+            msg += self._encode_int32(layer_info["blendoradd"])
+            xflags |= 256
+
+        # 512 tintcolor (uint32)
+        if has("tintcolor"):
+            msg += self._encode_uint32(layer_info["tintcolor"])
+            xflags |= 512
+
+        # 1024 redtargetcolor (uint32)
+        if has("redtargetcolor"):
+            msg += self._encode_uint32(layer_info["redtargetcolor"])
+            xflags |= 1024
+
+        # 2048 greentargetcolor (uint32)
+        if has("greentargetcolor"):
+            msg += self._encode_uint32(layer_info["greentargetcolor"])
+            xflags |= 2048
+
+        # 4096 bluetargetcolor (uint32)
+        if has("bluetargetcolor"):
+            msg += self._encode_uint32(layer_info["bluetargetcolor"])
+            xflags |= 4096
+
+        # 8192 inverted (uint32)
+        if has("inverted"):
+            msg += self._encode_uint32(layer_info["inverted"])
+            xflags |= 8192
+
+        # 16384 solomode (uint32)
+        if has("solomode"):
+            msg += self._encode_uint32(layer_info["solomode"])
+            xflags |= 16384
+
+        # If after all that xflags is still 0, nothing is set → no-op
+        if xflags == 0:
+            self.last_error = 0
+            return True
+
+        # Final payload: [bytesfromuint32(xflags), msg...]
+        payload = self._encode_uint32(xflags) + msg
+
+        # Send command and look at error code in header
+        msg_type, data = self.send_command(SETLAYERINFO, payload)
+
+        success = (msg_type == 1)
+        if success:
+            self.last_error = 0
+        else:
+            # Optional: we could parse 'data' to find an error code or
+            # add a get_last_error() call here. For now, just flag nonzero.
+            self.last_error = -1
+
+        return success
 # import json
 def main():
     vast = VASTControlClass(HOST,PORT)
@@ -524,17 +633,7 @@ def main():
     # hw_info = vast.get_hardware_info()
     # print(f"hw_info is a {type(hw_info[0])} as: {hw_info[0]}")
     n = vast.get_number_of_layers()
-    print("Number of layers:", n)
-    for layer_nr in range(n):
-        layer_info = vast.get_layer_info(layer_nr)
-        print(f"\n--- Layer {layer_nr} ---")
-        if not layer_info:
-            print(f"  ERROR: empty info, last_error={vast.last_error}")
-        else:
-            for k, v in layer_info.items():
-                print(f"  {k}: {v}")
-
-
+    print("layers:", n)
 
     vast.disconnect()
 

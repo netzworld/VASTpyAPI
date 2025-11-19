@@ -2,3 +2,4 @@
 
 # Ignore the VAST package folder and its contents
 VAST_package_1_5_0/
+__pycache__/*

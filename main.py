@@ -172,7 +172,26 @@ class VASTControlClass:
             finally:
                 self.client = None
         return 1
+    
+    @staticmethod
+    def _encode_uint32(value: int) -> bytes:
+        """
+        Equivalent of MATLAB bytesfromuint32(uint32(value)).
+        Format (from parse.m tags):
+        [1][4 bytes of uint32 little-endian]
+        """
+        return b"\x01" + struct.pack("<I", value & 0xFFFFFFFF)
+
+    @staticmethod
+    def _encode_int32(value: int) -> bytes:
+        """bytesfromint32(int32(value)) | for other APIs later."""
+        return b"\x04" + struct.pack("<i", value)
         
+    @staticmethod
+    def _encode_double(value: float) -> bytes:
+        # tag 2 + float64 LE
+        return b"\x02" + struct.pack("<d", float(value))
+    
     def send_command(self, msg_id: int, payload: bytes = b"") -> Tuple[int, bytes]:
         """
         Send a binary command to the VAST API and return the message type and response bytes.
@@ -183,15 +202,17 @@ class VASTControlClass:
         [12..15] = uint32 message ID (little-endian)
         [16..]   = payload (optional)
         """
+        client = self.client
+        if client is None:
+            raise RuntimeError("Not connected to VAST API.")
+        
         total_len = len(payload) + 4
         header    = b"VAST" + struct.pack("<Q", total_len) + struct.pack("<I", msg_id)
         message   = header + payload
 
         # print(f"Sending {len(message)} bytes: {message.hex()}")
 
-        client = self.client
-        if client is None:
-            raise RuntimeError("Not connected to VAST API.")
+        
         client.sendall(message)
 
         # Receive response header 
@@ -202,64 +223,94 @@ class VASTControlClass:
         total_len = struct.unpack("<Q", hdr[4:12])[0]
         msg_type  = struct.unpack("<I", hdr[12:16])[0]
 
-        # Receive payload 
-        payload_bytes = b""
-        while len(payload_bytes) < total_len - 4:
-            chunk = client.recv(4096)
+        expected = total_len - 4
+        payload_bytes = bytearray()
+        while len(payload_bytes) < expected:
+            chunk = client.recv(expected - len(payload_bytes))
             if not chunk:
-                break
-            payload_bytes += chunk
+                raise RuntimeError("Incomplete payload from VAST.")
+            payload_bytes.extend(chunk)
 
         # print(f"Response msg_type={msg_type}, len={len(payload_bytes)}")
-        return msg_type, payload_bytes
+        return msg_type, bytes(payload_bytes)
 
-    def parse_payload(self, data: bytes) -> dict:
+    def parse_payload(self, indata: bytes) -> Dict[str, Any]:
         """
-        Parse the raw VAST payload (no header).
-        """
-        if not isinstance(data, (bytes, bytearray)):
-            raise ValueError("Payload must be bytes")
+        Python equivalent of the inner part of MATLAB parse(obj, indata).
 
-        result = {
-            "msg_id":  None,
-            "uint32":  [],
-            "float64": [],
-            "int32":   [],
-            "strings": [],
-            "uint64":  [],
-        }
+        indata is assumed to be ONLY the typed payload (no 'VAST' header), returned by self.send_command().
+
+        Returns a dict:
+            {
+                "ints":    [int32, ...],
+                "uints":   [uint32, ...],
+                "doubles": [float64, ...],
+                "text":    [str, ...],      # all 0-terminated text chunks
+                "last_text": str | "",      # last inchardata
+                "uint64s": [int, ...],      # uint64 values
+            }
+        """
+        ints: List[int]      = []
+        uints: List[int]     = []
+        doubles: List[float] = []
+        texts: List[str]     = []
+        last_text: str       = ""
+        uint64s: List[int]   = []
 
         p = 0
-        while p < len(data):
-            t = data[p]
-            if t == 1:  # uint32
-                val = struct.unpack_from("<I", data, p + 1)[0]
-                result["uint32"].append(val)
-                p += 5
-            elif t == 2:  # double
-                val = struct.unpack_from("<d", data, p + 1)[0]
-                result["float64"].append(val)
-                p += 9
-            elif t == 3:  # zero-terminated string
-                q = data.find(b"\x00", p + 1)
-                if q == -1:
+        n = len(indata)
+        while p < n:
+            t   = indata[p]
+
+            if t   == 1:  # int32
+                if p + 5 > n:
                     break
-                result["strings"].append(data[p + 1:q].decode("utf-8", "ignore"))
-                p = q + 1
-            elif t == 4:  # int32
-                val = struct.unpack_from("<i", data, p + 1)[0]
-                result["int32"].append(val)
-                p += 5
-            elif t == 6:  # uint64
-                val = struct.unpack_from("<Q", data, p + 1)[0]
-                result["uint64"].append(val)
-                p += 9
+                val = struct.unpack("<I", indata[p+1:p+5])[0]
+                uints.append(val)
+                p  += 5
+            elif t == 2: # double | float64
+                if p + 9 > n:
+                    break
+                val = struct.unpack("<d", indata[p+1:p+9])[0]
+                doubles.append(val)
+                p  += 9
+            elif t == 3: # 0-terminated text
+                q = p + 1
+                while q < n and indata[q] != 0:
+                    q += 1
+                if q  >= n or indata[q]   != 0:
+                    break # abort parsing
+                text_bytes = indata[p+1:q]
+                try:
+                    s = text_bytes.decode("utf-8", errors="replace")
+                except Exception:
+                    s = "".join(chr(b) for b in text_bytes)
+                last_text = s
+                texts.append(s)
+                p = q + 1 # skip null terminator
+            elif t == 4: # int32
+                if p + 5 > n:
+                    break
+                val = struct.unpack("<i", indata[p+1:p+5])[0]
+                ints.append(val)
+                p  += 5
+            elif t == 5: # uint64
+                if p + 9 > n:
+                    break
+                val = struct.unpack("<Q", indata[p+1:p+9])[0]
+                uint64s.append(val)
+                p  += 9
             else:
-                # Unknown tag: stop to avoid misalignment
-                break
-
-        return result
-
+                break # unknown type
+        return {
+            "ints":    ints,
+            "uints":   uints,
+            "doubles":  doubles,
+            "text":  texts,
+            "last_text": last_text,
+            "uint64s":   uint64s,
+        }
+    
     ############################
     #     GENERAL FUNCTIONS    #
     ############################
@@ -390,19 +441,16 @@ class VASTControlClass:
     def get_number_of_layers(self) -> int:
         """ Get the number of layers in the current VAST session. """
         msg_type, data = self.send_command(GETNROFLAYERS)
-        if msg_type == 21:
-            self.last_error = 21
-            print(f"Error getting number of layers: {errorCodes[msg_type]}")
-            return 0
+        
         parsed = self.parse_payload(data)
-        u32 = parsed.get("uint32", [])
+        uints = parsed.get("uints", [])
 
-        if len(u32) == 1:
+        if len(uints) == 1:
             self.last_error = 0
-            return u32[0]
+            return uints[0]
         else:
             self.last_error = 2
-            print(f"Unexpected payload structure: uint32={len(u32)}")
+            print(f"Unexpected payload structure: uint32={len(uints)}")
             return 0
 
     def get_layer_info(self, layer_nr: int) -> dict:
@@ -410,21 +458,66 @@ class VASTControlClass:
         Retrieve information about a specific layer in VAST.
         Corresponds to MATLAB getlayerinfo(layernr).
         """
-        payload = struct.pack("<I", layer_nr)
-        print(payload)
+        payload = self._encode_uint32(layer_nr)
         msg_type, data = self.send_command(GETLAYERINFO, payload)
-        if msg_type == 21:
-            self.last_error = 21
-            print("No segmentation or dataset loaded in VAST.")
+
+        parsed  = self.parse_payload(data)
+        ints    = parsed.get("ints", [])
+        uints   = parsed.get("uints", [])
+        doubles = parsed.get("doubles", [])
+        name    = parsed.get("last_text", "")
+
+        if not (len(ints) == 8 and len(uints) == 7 and len(doubles) == 3 and name):
+            self.last_error = 2
+            print(f"Unexpected payload structure: ints={len(ints)}, uints={len(uints)}, doubles={len(doubles)}, text={len(name)}")
             return {}
-        parsed = self.parse_payload(data)
-        print(parsed)
-        return parsed
+
+        self.last_error = 0
+        
+        layer_type_map = {
+            0: "Image",
+            1: "Segmentation",
+            2: "Annotation",
+            3: "VSVR image",
+            6: "VSVI image",
+            7: "Tool",
+        }
+        layer_type = layer_type_map.get(ints[0], "Other")
+        layerinfo = {
+            "type":             layer_type,
+            "editable":         ints[1],
+            "visible":          ints[2],
+            "brightness":       ints[3],
+            "contrast":         ints[4],
+
+            "opacitylevel":     doubles[0],
+            "brightnesslevel":  doubles[1],
+            "contrastlevel":    doubles[2],
+
+            "blendmode":        ints[5],
+            "blendoradd":       ints[6],
+
+            "tintcolor":        uints[0],
+            "name":             name,
+
+            "redtargetcolor":   uints[1],
+            "greentargetcolor": uints[2],
+            "bluetargetcolor":  uints[3],
+            "bytesperpixel":    uints[4],
+
+            "ischanged":        ints[7],
+            "inverted":         uints[5],
+            "solomode":         uints[6],
+        }
+
+        return layerinfo        
 
 # import json
 def main():
     vast = VASTControlClass(HOST,PORT)
-    vast.connect()
+    if not vast.connect():
+        print("Failed to connect to VAST.")
+        return
     # print("api version: ", vast.get_api_version())
     # info = vast.get_info()
     # print(f"info is a {type(info[0])} as: {info[0]}")
@@ -432,13 +525,15 @@ def main():
     # print(f"hw_info is a {type(hw_info[0])} as: {hw_info[0]}")
     n = vast.get_number_of_layers()
     print("Number of layers:", n)
-    # for i in range(1,n+1):
-    #     # print(i, vast.get_layer_info(i).get("name"), vast.get_layer_info(i).get("type"))
-    #     print(i)
-    #     vast.get_layer_info(i)
-    # vast.get_layer_info(1)
-    vast.get_layer_info(2)
-    vast.get_layer_info(3)
+    for layer_nr in range(n):
+        layer_info = vast.get_layer_info(layer_nr)
+        print(f"\n--- Layer {layer_nr} ---")
+        if not layer_info:
+            print(f"  ERROR: empty info, last_error={vast.last_error}")
+        else:
+            for k, v in layer_info.items():
+                print(f"  {k}: {v}")
+
 
 
     vast.disconnect()

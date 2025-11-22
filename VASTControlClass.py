@@ -620,4 +620,148 @@ class VASTControlClass:
 
         return success
 
+    def get_mipmap_scale_factors(self, layer_nr: int) -> List[List[int]]:
+        """
+        Get the mipmap scale factors for a specific layer in VAST.
+        Corresponds to MATLAB getmipmapscalefactors(layernr).
+        """
+        payload = self._encode_uint32(layer_nr)
 
+        msg_type, raw = self.send_command(GETMIPMAPSCALEFACTORS, payload)
+
+        if len(raw) < 4 or (len(raw) % 4) != 0:
+            # At least one uint32 needed, and payload must be multiple of 4 bytes
+            self.last_error = 2  # "unexpected data received"
+            return []
+
+        # Interpret payload as an array of uint32 (little-endian)
+        count = len(raw) // 4
+        uid = struct.unpack("<{}I".format(count), raw)
+
+        num_levels = uid[0]  # same as uid(1) in MATLAB
+
+        # We expect 1 + 3*num_levels entries total
+        if 1 + 3 * num_levels > len(uid):
+            self.last_error = 2
+            return []
+
+        # Build matrix including mip level 0
+        matrix: List[List[int]] = []
+        idx = 1  # start from uid(2) in MATLAB (0-based index 1)
+
+        for _ in range(num_levels):
+            sx = uid[idx]
+            sy = uid[idx + 1]
+            sz = uid[idx + 2]
+            matrix.append([sx, sy, sz])
+            idx += 3
+
+        # Drop first row: mip level 0 (always [1,1,1])
+        if matrix:
+            matrix = matrix[1:]
+
+        self.last_error = 0
+        return matrix
+
+    def set_selected_layer_nr(self, layer_nr: int) -> bool:
+        """
+        Set the selected layer in VAST.
+        Corresponds to MATLAB setselectedlayernr(layernr).
+        """
+        payload = self._encode_uint32(layer_nr)
+        msg_type, data = self.send_command(SETSELECTEDLAYERNR, payload)
+        
+        success = (msg_type == 1)
+        if success:
+            self.last_error = 0
+        else:
+            self.last_error = -1
+
+        return success
+    
+    def get_selected_layer_nr(self) -> dict:
+        """
+        Get the selected layer number in VAST.
+        Corresponds to MATLAB getselectedlayernr().
+        """
+        msg_type, data = self.send_command(GETSELECTEDLAYERNR)
+
+        # msg_type is 'res' (1 = success, 0 = failure), not an error code
+        if msg_type != 1:
+            self.last_error = -1  
+            return {}
+
+        parsed = self.parse_payload(data)
+        ints = parsed.get("ints", [])
+
+        # MATLAB cases:
+        #   if nrinints == 3:
+        #       [sel, sel_em, sel_seg] = inintdata(1..3)
+        #   elseif nrinints == 5:
+        #       sel     = inintdata(1)
+        #       sel_em  = inintdata(2)
+        #       sel_seg = inintdata(4)
+        if len(ints) == 3:
+            selected_layer = ints[0]
+            selected_em_layer = ints[1]
+            selected_segment_layer = ints[2]
+        elif len(ints) == 5:
+            selected_layer = ints[0]
+            selected_em_layer = ints[1]
+            selected_segment_layer = ints[3]
+        else:
+            # Mirror MATLAB: unexpected data received
+            self.last_error = 2  # "Unexpected data received from VAST - API mismatch?"
+            return {}
+
+        # If we got here, treat as success; -1 is a *valid* "none" value.
+        self.last_error = 0
+        return {
+            "selected_layer": selected_layer,
+            "selected_em_layer": selected_em_layer,
+            "selected_segment_layer": selected_segment_layer,
+        }
+    
+    def get_selected_layer_nr2(self) -> dict:
+        msg_type, data = self.send_command(GETSELECTEDLAYERNR)
+
+        # msg_type is 'res': 1 = success, 0 = failure
+        if msg_type != 1:
+            self.last_error = -1  # generic failure; can refine with getlasterror later
+            return {}
+
+        parsed = self.parse_payload(data)
+        ints = parsed.get("ints", [])
+
+        # Defaults as in MATLAB
+        selected_layer = -1
+        selected_em_layer = -1
+        selected_anno_layer = -1
+        selected_segment_layer = -1
+        selected_tool_layer = -1
+
+        if len(ints) == 3:
+            # Backwards compatibility case
+            selected_layer = ints[0]
+            selected_em_layer = ints[1]
+            selected_segment_layer = ints[2]
+            # anno/tool remain -1
+        elif len(ints) == 5:
+            selected_layer        = ints[0]
+            selected_em_layer     = ints[1]
+            selected_anno_layer   = ints[2]
+            selected_segment_layer= ints[3]
+            selected_tool_layer   = ints[4]
+        else:
+            # Unexpected layout
+            self.last_error = 2  # "unexpected data received"
+            return {}
+
+        self.last_error = 0
+        return {
+            "selected_layer":         selected_layer,
+            "selected_em_layer":      selected_em_layer,
+            "selected_anno_layer":    selected_anno_layer,
+            "selected_segment_layer": selected_segment_layer,
+            "selected_tool_layer":    selected_tool_layer,
+        }

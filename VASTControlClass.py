@@ -1,5 +1,6 @@
 import socket
 import struct
+import numpy as np
 from typing import Tuple, Optional, Dict, Any, List
 
 HOST = "127.0.0.1"
@@ -314,61 +315,44 @@ class VASTControlClass:
     ############################
 
     def get_info(self) -> dict: 
-        """ Get general information from VAST. """
-        """ Returns a struct with the following fields if successful, or an empty struct [] if failed: """
         """
-            info.datasizex X (horizontal) size of the data volume in voxels at full resolution
-            info.datasizey Y (vertical) size of the data volume in voxels at full resolution
-            info.datasizez Z (number of slices) size of the data volume in voxels
-            info.voxelsizex X size of one voxel (in nm)
-            info.voxelsizey Y size of one voxel (in nm)
-            info.voxelsizez Z size of one voxel (in nm)
-            info.cubesizex X size of the internal cubes used in VAST in voxels; always 16
-            info.cubesizey Y size of the internal cubes used in VAST in voxels; always 16
-            info.cubesizez Z size of the internal cubes used in VAST in voxels; always 16
-            info.currentviewx Current view X coord in VAST in voxels at full res (window center)
-            info.currentviewy Current view Y coord in VAST in voxels at full res (window center)
-            info.currentviewz Current view Z coord in VAST in voxels (slice number)
-            info.nrofmiplevels Number of mip levels of the current data set
+        Get general information from VAST.
+        
+        Returns dict with dataset info, or empty dict on failure.
+        Fields: datasizex/y/z, voxelsizex/y/z, cubesizex/y/z, 
+                currentviewx/y/z, nrofmiplevels
         """
         msg_type, data = self.send_command(GETINFO)
-        if msg_type == 21:  # error
-            self.last_error = 21
-            print("No segmentation or dataset loaded in VAST.")
-            return {}
-        try:
-            parsed = self.parse_payload(data)
-            
-            u32 = parsed.get("uint32", [])
-            f64 = parsed.get("float64", [])
-            i32 = parsed.get("int32", [])
-
-            if len(u32) < 7 or len(f64) < 3 or len(i32) < 3:
-                print(f"Unexpected payload size: uint32={len(u32)}, float64={len(f64)}, int32={len(i32)}")
-                return {}
-
-            info = {
-                "datasizex":     u32[0],
-                "datasizey":     u32[1],
-                "datasizez":     u32[2],
-                "voxelsizex":    f64[0],
-                "voxelsizey":    f64[1],
-                "voxelsizez":    f64[2],
-                "cubesizex":     u32[3],
-                "cubesizey":     u32[4],
-                "cubesizez":     u32[5],
-                "currentviewx":  i32[0],
-                "currentviewy":  i32[1],
-                "currentviewz":  i32[2],
-                "nrofmiplevels": u32[6],
-            }
-
-            return info
         
-        except ValueError as e:
+        if msg_type != 1:
+            self.last_error = msg_type
+            return {}
+        
+        parsed = self.parse_payload(data)
+        uints = parsed.get("uints", [])
+        doubles = parsed.get("doubles", [])
+        ints = parsed.get("ints", [])
+        
+        if len(uints) == 7 and len(doubles) == 3 and len(ints) == 3:
+            self.last_error = 0
+            return {
+                "datasizex":     uints[0],
+                "datasizey":     uints[1],
+                "datasizez":     uints[2],
+                "voxelsizex":    doubles[0],
+                "voxelsizey":    doubles[1],
+                "voxelsizez":    doubles[2],
+                "cubesizex":     uints[3],
+                "cubesizey":     uints[4],
+                "cubesizez":     uints[5],
+                "currentviewx":  ints[0],
+                "currentviewy":  ints[1],
+                "currentviewz":  ints[2],
+                "nrofmiplevels": uints[6],
+            }
+        else:
             self.last_error = 2
-            print(f"Failed to parse info response: {data!r}, error: {e}")
-        return {}
+            return {}
     
     def get_api_version(self) -> int:
         msg_type, data = self.send_command(GETAPIVERSION)
@@ -765,3 +749,366 @@ class VASTControlClass:
             "selected_segment_layer": selected_segment_layer,
             "selected_tool_layer":    selected_tool_layer,
         }
+
+    ############################
+    #   SEGMENTATION FUNCTIONS #
+    ############################
+
+    def get_number_of_segments(self) -> int:
+        """Get the number of segments in the current segmentation."""
+        msg_type, data = self.send_command(GETNUMBEROFSEGMENTS)
+        
+        if msg_type != 1:
+            self.last_error = msg_type
+            return 0
+        
+        parsed = self.parse_payload(data)
+        uints = parsed.get("uints", [])
+        
+        if len(uints) == 1:
+            self.last_error = 0
+            return uints[0]
+        else:
+            self.last_error = 2
+            return 0
+
+    def get_segment_data(self, segment_id: int) -> dict:
+        """
+        Get metadata for a specific segment.
+        
+        Returns dict with:
+            id, flags, col1, col2, anchorpoint, hierarchy, collapsednr, boundingbox
+        """
+        payload = self._encode_uint32(segment_id)
+        msg_type, data = self.send_command(GETSEGMENTDATA, payload)
+        
+        if msg_type != 1:
+            self.last_error = msg_type
+            return {}
+        
+        parsed = self.parse_payload(data)
+        ints = parsed.get("ints", [])
+        uints = parsed.get("uints", [])
+        
+        if len(ints) == 9 and len(uints) == 9:
+            self.last_error = 0
+            return {
+                "id": uints[0],
+                "flags": uints[1],
+                "col1": uints[2],
+                "col2": uints[3],
+                "anchorpoint": ints[0:3],
+                "hierarchy": list(uints[4:8]),
+                "collapsednr": uints[8],
+                "boundingbox": ints[3:9],
+            }
+        else:
+            self.last_error = 2
+            return {}
+
+    def get_all_segment_data(self) -> List[dict]:
+        """
+        Get metadata for all segments.
+        
+        Returns list of dicts, each containing segment data.
+        """
+        msg_type, data = self.send_command(GETALLSEGMENTDATA)
+        
+        if msg_type != 1:
+            self.last_error = msg_type
+            return []
+        
+        # For large data, might need chunked reading
+        if len(data) < 4:
+            self.last_error = 2
+            return []
+        
+        # Parse as uint32 array
+        arr = np.frombuffer(data, dtype=np.uint32)
+        iarr = np.frombuffer(data, dtype=np.int32)
+        
+        num_segments = arr[0]
+        segments = []
+        
+        sp = 1  # start position (0-based in Python)
+        for i in range(num_segments):
+            seg = {
+                "id": i,
+                "flags": arr[sp],
+                "col1": arr[sp + 1],
+                "col2": arr[sp + 2],
+                "anchorpoint": [int(iarr[sp + 3]), int(iarr[sp + 4]), int(iarr[sp + 5])],
+                "hierarchy": [int(arr[sp + 6]), int(arr[sp + 7]), int(arr[sp + 8]), int(arr[sp + 9])],
+                "collapsednr": arr[sp + 10],
+                "boundingbox": [int(iarr[sp + 11]), int(iarr[sp + 12]), int(iarr[sp + 13]),
+                               int(iarr[sp + 14]), int(iarr[sp + 15]), int(iarr[sp + 16])],
+            }
+            segments.append(seg)
+            sp += 17
+        
+        self.last_error = 0
+        return segments
+
+    def get_seg_image_raw(self, miplevel: int, minx: int, maxx: int, 
+                          miny: int, maxy: int, minz: int, maxz: int,
+                          immediate: bool = False, request_load: bool = False) -> Optional[bytes]:
+        """
+        Get raw segmentation image data as uint16 array.
+        
+        Args:
+            miplevel: Mip level to retrieve
+            minx, maxx, miny, maxy, minz, maxz: Bounding box coordinates
+            immediate: Use immediate mode (don't wait for disk cache)
+            request_load: Request loading from disk if not in cache
+            
+        Returns:
+            Raw bytes (uint16 little-endian) or None on error
+        """
+        cmd = GETSEGIMAGERAWIMMEDIATE if immediate else GETSEGIMAGERAW
+        
+        if immediate:
+            payload = self._encode_uint32(miplevel) + self._encode_uint32(minx) + \
+                     self._encode_uint32(maxx) + self._encode_uint32(miny) + \
+                     self._encode_uint32(maxy) + self._encode_uint32(minz) + \
+                     self._encode_uint32(maxz) + self._encode_uint32(int(request_load))
+        else:
+            payload = self._encode_uint32(miplevel) + self._encode_uint32(minx) + \
+                     self._encode_uint32(maxx) + self._encode_uint32(miny) + \
+                     self._encode_uint32(maxy) + self._encode_uint32(minz) + \
+                     self._encode_uint32(maxz)
+        
+        msg_type, data = self.send_command(cmd, payload)
+        
+        if msg_type != 1:
+            self.last_error = msg_type
+            return None
+        
+        self.last_error = 0
+        return data
+
+    def get_seg_image_rle(self, miplevel: int, minx: int, maxx: int,
+                          miny: int, maxy: int, minz: int, maxz: int,
+                          surf_only: bool = False, immediate: bool = False,
+                          request_load: bool = False) -> Optional[bytes]:
+        """
+        Get RLE-encoded segmentation image data.
+        
+        Returns:
+            RLE-encoded bytes (uint16 pairs: value, count) or None on error
+        """
+        if immediate:
+            cmd = GETSEGIMAGERLEIMMEDIATE
+            payload = self._encode_uint32(miplevel) + self._encode_uint32(minx) + \
+                     self._encode_uint32(maxx) + self._encode_uint32(miny) + \
+                     self._encode_uint32(maxy) + self._encode_uint32(minz) + \
+                     self._encode_uint32(maxz) + self._encode_uint32(int(request_load))
+        else:
+            cmd = GETSEGIMAGESURFRLE if surf_only else GETSEGIMAGERLE
+            payload = self._encode_uint32(miplevel) + self._encode_uint32(minx) + \
+                     self._encode_uint32(maxx) + self._encode_uint32(miny) + \
+                     self._encode_uint32(maxy) + self._encode_uint32(minz) + \
+                     self._encode_uint32(maxz)
+        
+        msg_type, data = self.send_command(cmd, payload)
+        
+        if msg_type != 1:
+            self.last_error = msg_type
+            return None
+        
+        self.last_error = 0
+        return data
+
+    def get_seg_image_rle_decoded(self, miplevel: int, minx: int, maxx: int,
+                                   miny: int, maxy: int, minz: int, maxz: int,
+                                   surf_only: bool = False, immediate: bool = False,
+                                   request_load: bool = False):
+        """
+        Get segmentation image with RLE decoding applied.
+        
+        Returns:
+            numpy array of shape (maxy-miny+1, maxx-minx+1, maxz-minz+1) dtype uint16
+        """
+        import numpy as np
+        
+        rle_data = self.get_seg_image_rle(miplevel, minx, maxx, miny, maxy, minz, maxz,
+                                          surf_only, immediate, request_load)
+        
+        if rle_data is None:
+            return None
+        
+        # Decode RLE
+        rle = np.frombuffer(rle_data, dtype=np.uint16)
+        
+        # Calculate expected size
+        size_x = maxx - minx + 1
+        size_y = maxy - miny + 1
+        size_z = maxz - minz + 1
+        expected_size = size_x * size_y * size_z
+        
+        result = np.zeros(expected_size, dtype=np.uint16)
+        dp = 0
+        
+        for sp in range(0, len(rle), 2):
+            val = rle[sp]
+            count = rle[sp + 1]
+            result[dp:dp + count] = val
+            dp += count
+        
+        # Reshape to (X, Y, Z) then transpose to (Y, X, Z) to match MATLAB
+        result = result.reshape(size_x, size_y, size_z)
+        result = np.transpose(result, (1, 0, 2))
+        
+        return result
+
+    def set_seg_translation(self, source_array: List[int], target_array: List[int]) -> bool:
+        """
+        Set segmentation translation table for image retrieval.
+        
+        Maps source segment IDs to target IDs during image transfer.
+        Pass empty arrays to clear translation.
+        """
+        if len(source_array) != len(target_array):
+            self.last_error = 50
+            return False
+        
+        # Interleave source and target arrays
+        translate = []
+        for src, tgt in zip(source_array, target_array):
+            translate.append(src)
+            translate.append(tgt)
+        
+        payload = b""
+        for val in translate:
+            payload += self._encode_uint32(val)
+        
+        msg_type, data = self.send_command(SETSEGTRANSLATION, payload)
+        
+        success = (msg_type == 1)
+        self.last_error = 0 if success else msg_type
+        return success
+    
+    ############################
+    #   ANNOTATION FUNCTIONS   #
+    ############################
+
+    def get_anno_layer_nr_of_objects(self) -> tuple:
+        """Get number of annotation objects and first object number."""
+        msg_type, data = self.send_command(GETANNOLAYERNROFOBJECTS)
+        
+        if msg_type != 1:
+            self.last_error = msg_type
+            return 0, -1
+        
+        parsed = self.parse_payload(data)
+        uints = parsed.get("uints", [])
+        
+        if len(uints) == 2:
+            self.last_error = 0
+            return uints[0], uints[1]
+        else:
+            self.last_error = 2
+            return 0, -1
+
+    def get_ao_node_data(self) -> Optional[np.ndarray]:
+        """
+        Get all skeleton node data from selected annotation layer.
+        
+        Returns numpy array with columns:
+        0: node index (DFS number)
+        1: isselected flag
+        2: edge flags
+        3: has label flag
+        4: reserved
+        5-10: parent, child1, child2, prev, next, nrofchildren (uint32, -1 means none)
+        11: radius (double)
+        12-13: x, y coordinates (uint32)
+        """
+        msg_type, data = self.send_command(GETAONODEDATA)
+        
+        if msg_type != 1:
+            self.last_error = msg_type
+            return None
+        
+        import numpy as np
+        
+        # Parse as uint32 array
+        arr = np.frombuffer(data, dtype=np.uint32)
+        
+        if len(arr) < 1:
+            self.last_error = 2
+            return None
+        
+        num_nodes = arr[0]
+        node_data = np.zeros((num_nodes, 14))
+        
+        sp = 1
+        for i in range(num_nodes):
+            node_data[i, 0] = i  # DFS number
+            node_data[i, 1] = arr[sp] & 0xFF  # isselected
+            node_data[i, 2] = (arr[sp] >> 8) & 0xFF  # edgeflags
+            node_data[i, 3] = (arr[sp] >> 16) & 0xFF  # haslabel
+            node_data[i, 4] = (arr[sp] >> 24) & 0xFF  # reserved
+            
+            # Hierarchy (convert 0xFFFFFFFF to -1)
+            for j in range(6):
+                val = arr[sp + 1 + j]
+                node_data[i, 5 + j] = -1 if val == 0xFFFFFFFF else val
+            
+            # Radius (double at position sp+7, sp+8)
+            radius_bytes = data[4 * (sp + 7):4 * (sp + 9)]
+            node_data[i, 11] = np.frombuffer(radius_bytes, dtype=np.float64)[0]
+            
+            # X, Y coordinates
+            node_data[i, 12] = arr[sp + 9]
+            node_data[i, 13] = arr[sp + 10]
+            
+            sp += 11
+        
+        self.last_error = 0
+        return node_data
+
+    def get_anno_layer_object_data(self) -> List[dict]:
+        """Get metadata for all annotation objects."""
+        msg_type, data = self.send_command(GETANNOLAYEROBJECTDATA)
+        
+        if msg_type != 1:
+            self.last_error = msg_type
+            return []
+        
+        import numpy as np
+        arr = np.frombuffer(data, dtype=np.uint32)
+        
+        if len(arr) < 1:
+            return []
+        
+        num_objects = arr[0]
+        objects = []
+        
+        sp = 1
+        for i in range(num_objects):
+            obj = {
+                "id": i + 1,
+                "type": arr[sp] & 0xFFFF,  # 0=folder, 1=skeleton
+                "flags": (arr[sp] >> 16) & 0xFFFF,
+                "col1": arr[sp + 1],
+                "col2": arr[sp + 2],
+                "anchorpoint": [arr[sp + 3], arr[sp + 4], arr[sp + 5]],
+                "hierarchy": [arr[sp + 6], arr[sp + 7], arr[sp + 8], arr[sp + 9]],
+                "collapsednr": arr[sp + 10],
+                "boundingbox": [arr[sp + 11], arr[sp + 12], arr[sp + 13], 
+                            arr[sp + 14], arr[sp + 15], arr[sp + 16]],
+            }
+            objects.append(obj)
+            sp += 21
+        
+        self.last_error = 0
+        return objects
+
+    def set_selected_anno_object_nr(self, object_id: int) -> bool:
+        """Select an annotation object by ID."""
+        payload = self._encode_uint32(object_id)
+        msg_type, data = self.send_command(SETSELECTEDANNOOBJECTNR, payload)
+        
+        success = (msg_type == 1)
+        self.last_error = 0 if success else msg_type
+        return success

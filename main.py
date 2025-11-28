@@ -25,44 +25,11 @@ def main():
     else:
         print("No dataset loaded")
 
-    # Test API version
-    version = vast.get_api_version()
-    print(f"API version: {version}")
-
-    # Test layer info
-    num_layers = vast.get_number_of_layers()
-    print(f"Number of layers: {num_layers}")
-
-    if num_layers > 0:
-        layer_info = vast.get_layer_info(0)
-        if layer_info:
-            print(f"Layer 0: {layer_info['name']} ({layer_info['type']})")
-
-    # Test segmentation
-    num_segs = vast.get_number_of_segments()
-    print(f"Number of segments: {num_segs}")
-
-    if num_segs > 0:
-        # Get first segment data
-        seg = vast.get_segment_data(1)
-        if seg:
-            print(f"Segment 1 bounding box: {seg['boundingbox']}")
-            
-            # Try getting a small image region
-            bbox = seg['boundingbox']
-            img = vast.get_seg_image_rle_decoded(
-                miplevel=0,
-                minx=bbox[0], maxx=min(bbox[3], bbox[0]+50),
-                miny=bbox[1], maxy=min(bbox[4], bbox[1]+50),
-                minz=bbox[2], maxz=bbox[2]  # Single slice
-            )
-            
-            if img is not None:
-                print(f"Retrieved image shape: {img.shape}")
-                print(f"Unique segment IDs in region: {len(set(img.flatten()))}")
-
-
-
+    anno = vast.get_anno_layer_nr_of_objects()
+    print(f"Number of annotation objects: {anno}")
+    an = vast.set_selected_anno_object_nr(1)
+    print(f"Set selected annotation object to 1: {an}")
+    
     vast.disconnect()
 
 if __name__ == "__main__":

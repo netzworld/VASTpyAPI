@@ -772,6 +772,25 @@ class VASTControlClass:
             self.last_error = 2
             return 0
 
+    def get_segment_name(self, segment_id: int) -> str:
+        """Get the name of a specific segment."""
+        payload = self._encode_uint32(segment_id)
+        msg_type, data = self.send_command(GETSEGMENTNAME, payload)
+        
+        if msg_type != 1:
+            self.last_error = msg_type
+            return ""
+        
+        parsed = self.parse_payload(data)
+        name = parsed.get("last_text", "")
+        
+        if name:
+            self.last_error = 0
+            return name
+        else:
+            self.last_error = 2
+            return ""
+
     def get_segment_data(self, segment_id: int) -> dict:
         """
         Get metadata for a specific segment.
@@ -805,6 +824,49 @@ class VASTControlClass:
         else:
             self.last_error = 2
             return {}
+
+    def get_all_segment_names(self) -> List[str]:
+        """Get names of all segments in the dataset."""
+        msg_type, data = self.send_command(GETALLSEGMENTNAMES)
+        
+        if msg_type != 1:
+            self.last_error = msg_type
+            return []
+        
+        if len(data) < 4:
+            self.last_error = 2
+            return []
+        
+        import struct
+        
+        # First uint32 is number of names
+        num_names = struct.unpack("<I", data[0:4])[0]
+        
+        names = []
+        pos = 4
+        
+        for i in range(num_names):
+            # Find null terminator
+            end_pos = pos
+            while end_pos < len(data) and data[end_pos] != 0:
+                end_pos += 1
+            
+            if end_pos >= len(data):
+                self.last_error = 2
+                return []
+            
+            # Extract name
+            name_bytes = data[pos:end_pos]
+            try:
+                name = name_bytes.decode('utf-8', errors='replace')
+            except:
+                name = ''.join(chr(b) for b in name_bytes)
+            
+            names.append(name)
+            pos = end_pos + 1  # Skip null terminator
+        
+        self.last_error = 0
+        return names  
 
     def get_all_segment_data(self) -> List[dict]:
         """

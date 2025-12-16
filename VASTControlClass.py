@@ -172,6 +172,14 @@ class VASTControlClass:
                 self.client = None
         return 1
     
+    def _encode_text(self, text: str) -> bytes:
+        """
+        Encode text as type 3 (null-terminated string).
+        Format: [3][text bytes][0]
+        """
+        text_bytes = text.encode('utf-8')
+        return b'\x03' + text_bytes + b'\x00'
+
     @staticmethod
     def _encode_uint32(value: int) -> bytes:
         """
@@ -417,7 +425,7 @@ class VASTControlClass:
         return self.last_error
 
     ############################
-    #      LAYER FUNCTION      #
+    #     LAYER FUNCTIONS      #
     ############################
 
     def get_number_of_layers(self) -> int:
@@ -750,6 +758,909 @@ class VASTControlClass:
             "selected_tool_layer":    selected_tool_layer,
         }
 
+    def add_new_layer(self, layer_type: int, name: str, ref_id: int = -1) -> int:
+        """Add a new layer to VAST."""
+        payload = self._encode_int32(layer_type) + self._encode_int32(ref_id) + \
+                self._encode_text(name)
+        
+        msg_type, data = self.send_command(ADDNEWLAYER, payload)
+        
+        if msg_type != 1:
+            self.last_error = msg_type
+            return 0
+        
+        parsed = self.parse_payload(data)
+        uints = parsed.get("uints", [])
+        
+        if len(uints) == 1:
+            self.last_error = 0
+            return uints[0]
+        else:
+            self.last_error = 2
+            return 0
+
+    def load_layer(self, filename: str, ref_id: int = -1) -> int:
+        """Load a layer from file."""
+        payload = self._encode_int32(ref_id) + self._encode_text(filename)
+        
+        msg_type, data = self.send_command(LOADLAYER, payload)
+        
+        if msg_type != 1:
+            self.last_error = msg_type
+            return 0
+        
+        parsed = self.parse_payload(data)
+        uints = parsed.get("uints", [])
+        
+        if len(uints) == 1:
+            self.last_error = 0
+            return uints[0]
+        else:
+            self.last_error = 2
+            return 0
+
+    def save_layer(self, layer_nr: int, filename: str, force: bool = False, 
+                subformat: int = 0) -> bool:
+        """Save a layer to file."""
+        payload = self._encode_uint32(layer_nr) + \
+                self._encode_uint32(int(force)) + \
+                self._encode_uint32(subformat) + \
+                self._encode_text(filename)
+        
+        msg_type, data = self.send_command(SAVELAYER, payload)
+        
+        success = (msg_type == 1)
+        self.last_error = 0 if success else msg_type
+        return success
+    
+    def remove_layer(self, layer_nr: int, force: bool = False) -> bool:
+        """
+        Remove a layer.
+        
+        Args:
+            layer_nr: Layer number to remove
+            force: Force removal without confirmation
+        
+        Returns:
+            True on success, False on failure
+        """
+        payload = self._encode_uint32(layer_nr) + self._encode_uint32(int(force))
+        msg_type, data = self.send_command(REMOVELAYER, payload)
+        
+        success = (msg_type == 1)
+        self.last_error = 0 if success else msg_type
+        return success
+
+    def move_layer(self, moved_layer_nr: int, after_layer_nr: int) -> int:
+        """
+        Move a layer to a new position in the layer list.
+        
+        Args:
+            moved_layer_nr: Layer to move
+            after_layer_nr: Insert after this layer
+        
+        Returns:
+            New layer number, or 0 on failure
+        """
+        payload = self._encode_uint32(moved_layer_nr) + \
+                self._encode_uint32(after_layer_nr)
+        
+        msg_type, data = self.send_command(MOVELAYER, payload)
+        
+        if msg_type != 1:
+            self.last_error = msg_type
+            return 0
+        
+        parsed = self.parse_payload(data)
+        uints = parsed.get("uints", [])
+        
+        if len(uints) == 1:
+            self.last_error = 0
+            return uints[0]
+        else:
+            self.last_error = 2
+            return 0
+
+    def get_api_layers_enabled(self) -> int:
+        """
+        Check if separate API layer selection is enabled.
+        
+        Returns:
+            1 if enabled, 0 if disabled, -1 on error
+        """
+        msg_type, data = self.send_command(GETAPILAYERSENABLED)
+        
+        if msg_type != 1:
+            self.last_error = msg_type
+            return -1
+        
+        parsed = self.parse_payload(data)
+        uints = parsed.get("uints", [])
+        
+        if len(uints) == 1:
+            self.last_error = 0
+            return uints[0]
+        else:
+            self.last_error = 2
+            return -1
+
+    def set_api_layers_enabled(self, enabled: bool) -> bool:
+        """
+        Enable or disable separate API layer selection.
+        
+        When enabled, API functions use layers set via set_selected_api_layer_nr().
+        When disabled, API functions use the layer selected in VAST UI.
+        
+        Args:
+            enabled: True to enable API layer selection, False to disable
+        
+        Returns:
+            True on success, False on failure
+        """
+        payload = self._encode_uint32(int(enabled))
+        msg_type, data = self.send_command(SETAPILAYERSENABLED, payload)
+        
+        success = (msg_type == 1)
+        self.last_error = 0 if success else msg_type
+        return success
+
+    def get_selected_api_layer_nr(self) -> dict:
+        """
+        Get the currently selected API layer numbers.
+        
+        Returns dict with keys:
+            selected_layer: Most recently selected layer of any type
+            selected_em_layer: Selected EM/image layer
+            selected_anno_layer: Selected annotation layer
+            selected_segment_layer: Selected segmentation layer
+            selected_tool_layer: Selected tool layer
+        
+        Returns empty dict on failure.
+        """
+        msg_type, data = self.send_command(GETSELECTEDAPILAYERNR)
+        
+        if msg_type != 1:
+            self.last_error = msg_type
+            return {}
+        
+        parsed = self.parse_payload(data)
+        ints = parsed.get("ints", [])
+        
+        if len(ints) == 5:
+            self.last_error = 0
+            return {
+                "selected_layer": ints[0],
+                "selected_em_layer": ints[1],
+                "selected_anno_layer": ints[2],
+                "selected_segment_layer": ints[3],
+                "selected_tool_layer": ints[4],
+            }
+        else:
+            self.last_error = 2
+            return {}
+
+    def set_selected_api_layer_nr(self, layer_nr: int) -> bool:
+        """
+        Select a layer for API access.
+        
+        Note: API layer control must be enabled via set_api_layers_enabled(True)
+        for this selection to be used by API functions.
+        
+        Args:
+            layer_nr: Layer number to select
+        
+        Returns:
+            True on success, False on failure
+        """
+        payload = self._encode_int32(layer_nr)
+        msg_type, data = self.send_command(SETSELECTEDAPILAYERNR, payload)
+        
+        success = (msg_type == 1)
+        self.last_error = 0 if success else msg_type
+        return success
+
+    ############################
+    #   ANNOTATION FUNCTIONS   #
+    ############################
+
+    def get_anno_object(self, object_id: int) -> dict:
+        """
+        Get complete annotation object data as structured dict.
+        
+        Args:
+            object_id: Annotation object ID (0 = currently selected)
+        
+        Returns:
+            Dict with all object data, or empty dict on failure
+        """
+        payload = self._encode_uint32(object_id)
+        msg_type, data = self.send_command(GETANNOOBJECT, payload)
+        
+        if msg_type != 1:
+            self.last_error = msg_type
+            return {}
+        
+        # Decode structured data
+        obj_data = self._decode_to_struct(data)
+        
+        if obj_data is None:
+            self.last_error = 2
+            return {}
+        
+        self.last_error = 0
+        return obj_data
+
+    def get_ao_node_params(self, anno_object_id: int, node_dfsnr: int) -> dict:
+        """
+        Get detailed parameters for a specific node.
+        
+        Args:
+            anno_object_id: Annotation object ID (0 = currently selected)
+            node_dfsnr: Node DFS number
+        
+        Returns:
+            Dict with node parameters, or empty dict on failure
+        """
+        payload = self._encode_uint32(anno_object_id) + \
+                self._encode_uint32(node_dfsnr)
+        
+        msg_type, data = self.send_command(GETAONODEPARAMS, payload)
+        
+        if msg_type != 1:
+            self.last_error = msg_type
+            return {}
+        
+        # Decode structured data
+        node_data = self._decode_to_struct(data)
+        
+        if node_data is None:
+            self.last_error = 2
+            return {}
+        
+        self.last_error = 0
+        return node_data
+
+    def set_anno_object(self, object_id: int, obj_data: dict) -> int:
+        """
+        Set/update annotation object data.
+        
+        Args:
+            object_id: Object ID to update
+            obj_data: Dict with object data (from get_anno_object format)
+        
+        Returns:
+            Object ID on success, 0 on failure
+        """
+        encoded_data = self._encode_from_struct(obj_data)
+        payload = self._encode_uint32(object_id) + encoded_data
+        
+        msg_type, data = self.send_command(SETANNOOBJECT, payload)
+        
+        if msg_type != 1:
+            self.last_error = msg_type
+            return 0
+        
+        parsed = self.parse_payload(data)
+        uints = parsed.get("uints", [])
+        
+        if len(uints) == 1:
+            self.last_error = 0
+            return uints[0]
+        else:
+            self.last_error = 2
+            return 0
+
+    def add_anno_object(self, ref_id: int, next_or_child: int, obj_data: dict) -> int:
+        """
+        Add new annotation object with complete data.
+        
+        Args:
+            ref_id: Reference object ID
+            next_or_child: 0=next sibling, 1=child
+            obj_data: Dict with object data
+        
+        Returns:
+            New object ID, or 0 on failure
+        """
+        encoded_data = self._encode_from_struct(obj_data)
+        payload = self._encode_uint32(ref_id) + \
+                self._encode_uint32(next_or_child) + \
+                encoded_data
+        
+        msg_type, data = self.send_command(ADDANNOOBJECT, payload)
+        
+        if msg_type != 1:
+            self.last_error = msg_type
+            return 0
+        
+        parsed = self.parse_payload(data)
+        uints = parsed.get("uints", [])
+        
+        if len(uints) == 1:
+            self.last_error = 0
+            return uints[0]
+        else:
+            self.last_error = 2
+            return 0
+
+    def set_ao_node_params(self, anno_object_id: int, node_dfsnr: int, 
+                        node_data: dict) -> bool:
+        """
+        Set parameters for a specific node.
+        
+        Args:
+            anno_object_id: Annotation object ID
+            node_dfsnr: Node DFS number
+            node_data: Dict with node parameters
+        
+        Returns:
+            True on success, False on failure
+        """
+        encoded_data = self._encode_from_struct(node_data)
+        payload = self._encode_uint32(anno_object_id) + \
+                self._encode_uint32(node_dfsnr) + \
+                encoded_data
+        
+        msg_type, data = self.send_command(SETAONODEPARAMS, payload)
+        
+        success = (msg_type == 1)
+        self.last_error = 0 if success else msg_type
+        return success
+
+    def get_anno_layer_nr_of_objects(self) -> tuple:
+        """Get number of annotation objects and first object number."""
+        msg_type, data = self.send_command(GETANNOLAYERNROFOBJECTS)
+        
+        if msg_type != 1:
+            self.last_error = msg_type
+            return 0, -1
+        
+        parsed = self.parse_payload(data)
+        uints = parsed.get("uints", [])
+        
+        if len(uints) == 2:
+            self.last_error = 0
+            return uints[0], uints[1]
+        else:
+            self.last_error = 2
+            return 0, -1
+
+    def get_ao_node_data(self) -> Optional[np.ndarray]:
+        """
+        Get all skeleton node data from selected annotation layer.
+        
+        Returns numpy array with columns:
+        0: node index (DFS number)
+        1: isselected flag
+        2: edge flags
+        3: has label flag
+        4: reserved
+        5-10: parent, child1, child2, prev, next, nrofchildren (uint32, -1 means none)
+        11: radius (double)
+        12-13: x, y coordinates (uint32)
+        """
+        msg_type, data = self.send_command(GETAONODEDATA)
+        
+        if msg_type != 1:
+            self.last_error = msg_type
+            return None
+        
+        import numpy as np
+        
+        # Parse as uint32 array
+        arr = np.frombuffer(data, dtype=np.uint32)
+        
+        if len(arr) < 1:
+            self.last_error = 2
+            return None
+        
+        num_nodes = arr[0]
+        node_data = np.zeros((num_nodes, 14))
+        
+        sp = 1
+        for i in range(num_nodes):
+            node_data[i, 0] = i  # DFS number
+            node_data[i, 1] = arr[sp] & 0xFF  # isselected
+            node_data[i, 2] = (arr[sp] >> 8) & 0xFF  # edgeflags
+            node_data[i, 3] = (arr[sp] >> 16) & 0xFF  # haslabel
+            node_data[i, 4] = (arr[sp] >> 24) & 0xFF  # reserved
+            
+            # Hierarchy (convert 0xFFFFFFFF to -1)
+            for j in range(6):
+                val = arr[sp + 1 + j]
+                node_data[i, 5 + j] = -1 if val == 0xFFFFFFFF else val
+            
+            # Radius (double at position sp+7, sp+8)
+            radius_bytes = data[4 * (sp + 7):4 * (sp + 9)]
+            node_data[i, 11] = np.frombuffer(radius_bytes, dtype=np.float64)[0]
+            
+            # X, Y coordinates
+            node_data[i, 12] = arr[sp + 9]
+            node_data[i, 13] = arr[sp + 10]
+            
+            sp += 11
+        
+        self.last_error = 0
+        return node_data
+
+    def get_anno_layer_object_data(self) -> List[dict]:
+        """Get metadata for all annotation objects."""
+        msg_type, data = self.send_command(GETANNOLAYEROBJECTDATA)
+        
+        if msg_type != 1:
+            self.last_error = msg_type
+            return []
+        
+        import numpy as np
+        arr = np.frombuffer(data, dtype=np.uint32)
+        
+        if len(arr) < 1:
+            return []
+        
+        num_objects = arr[0]
+        objects = []
+        
+        sp = 1
+        for i in range(num_objects):
+            obj = {
+                "id": i + 1,
+                "type": arr[sp] & 0xFFFF,  # 0=folder, 1=skeleton
+                "flags": (arr[sp] >> 16) & 0xFFFF,
+                "col1": arr[sp + 1],
+                "col2": arr[sp + 2],
+                "anchorpoint": [arr[sp + 3], arr[sp + 4], arr[sp + 5]],
+                "hierarchy": [arr[sp + 6], arr[sp + 7], arr[sp + 8], arr[sp + 9]],
+                "collapsednr": arr[sp + 10],
+                "boundingbox": [arr[sp + 11], arr[sp + 12], arr[sp + 13], 
+                            arr[sp + 14], arr[sp + 15], arr[sp + 16]],
+            }
+            objects.append(obj)
+            sp += 21
+        
+        self.last_error = 0
+        return objects
+
+    def set_selected_anno_object_nr(self, object_id: int) -> bool:
+        """Select an annotation object by ID."""
+        payload = self._encode_uint32(object_id)
+        msg_type, data = self.send_command(SETSELECTEDANNOOBJECTNR, payload)
+        
+        success = (msg_type == 1)
+        self.last_error = 0 if success else msg_type
+        return success
+
+    def get_anno_layer_object_names(self) -> List[str]:
+        """
+        Get names of all annotation objects in the selected annotation layer.
+        
+        Returns:
+            List of object names, or empty list on failure
+        """
+        msg_type, data = self.send_command(GETANNOLAYEROBJECTNAMES)
+        
+        if msg_type != 1:
+            self.last_error = msg_type
+            return []
+        
+        if len(data) < 4:
+            self.last_error = 2
+            return []
+        
+        import struct
+        
+        # First uint32 is number of names
+        num_names = struct.unpack("<I", data[0:4])[0]
+        
+        names = []
+        pos = 4
+        
+        for i in range(num_names):
+            # Find null terminator
+            end_pos = pos
+            while end_pos < len(data) and data[end_pos] != 0:
+                end_pos += 1
+            
+            if end_pos >= len(data):
+                self.last_error = 2
+                return []
+            
+            # Extract name
+            name_bytes = data[pos:end_pos]
+            try:
+                name = name_bytes.decode('utf-8', errors='replace')
+            except:
+                name = ''.join(chr(b) for b in name_bytes)
+            
+            names.append(name)
+            pos = end_pos + 1  # Skip null terminator
+        
+        self.last_error = 0
+        return names
+
+    def add_new_anno_object(self, ref_id: int, next_or_child: int, 
+                            obj_type: int, name: str) -> int:
+        """
+        Add a new annotation object.
+        
+        Args:
+            ref_id: Reference object ID
+            next_or_child: 0=add as next sibling, 1=add as child
+            obj_type: 0=folder, 1=skeleton
+            name: Name for the new object
+        
+        Returns:
+            ID of new object, or 0 on failure
+        """
+        payload = self._encode_uint32(ref_id) + \
+                self._encode_uint32(next_or_child) + \
+                self._encode_uint32(obj_type) + \
+                self._encode_text(name)
+        
+        msg_type, data = self.send_command(ADDNEWANNOOBJECT, payload)
+        
+        if msg_type != 1:
+            self.last_error = msg_type
+            return 0
+        
+        parsed = self.parse_payload(data)
+        uints = parsed.get("uints", [])
+        
+        if len(uints) == 1:
+            self.last_error = 0
+            return uints[0]
+        else:
+            self.last_error = 2
+            return 0
+
+    def move_anno_object(self, obj_id: int, ref_id: int, next_or_child: int) -> bool:
+        """
+        Move an annotation object in the hierarchy.
+        
+        Args:
+            obj_id: Object to move
+            ref_id: Reference object
+            next_or_child: 0=move as next sibling, 1=move as child
+        
+        Returns:
+            True on success, False on failure
+        """
+        payload = self._encode_uint32(obj_id) + \
+                self._encode_uint32(ref_id) + \
+                self._encode_uint32(next_or_child)
+        
+        msg_type, data = self.send_command(MOVEANNOOBJECT, payload)
+        
+        success = (msg_type == 1)
+        self.last_error = 0 if success else msg_type
+        return success
+
+    def remove_anno_object(self, obj_id: int) -> bool:
+        """
+        Remove an annotation object.
+        
+        Args:
+            obj_id: Object ID to remove
+        
+        Returns:
+            True on success, False on failure
+        """
+        payload = self._encode_uint32(obj_id)
+        msg_type, data = self.send_command(REMOVEANNOOBJECT, payload)
+        
+        success = (msg_type == 1)
+        self.last_error = 0 if success else msg_type
+        return success
+
+    def get_selected_anno_object_nr(self) -> int:
+        """
+        Get the currently selected annotation object number.
+        
+        Returns:
+            Object ID, or -1 on failure
+        """
+        msg_type, data = self.send_command(GETSELECTEDANNOOBJECTNR)
+        
+        if msg_type != 1:
+            self.last_error = msg_type
+            return -1
+        
+        parsed = self.parse_payload(data)
+        uints = parsed.get("uints", [])
+        
+        if len(uints) == 1:
+            self.last_error = 0
+            return uints[0]
+        else:
+            self.last_error = 2
+            return -1
+
+    def get_ao_node_labels(self) -> tuple:
+        """
+        Get labels for skeleton nodes that have labels.
+        
+        Returns:
+            Tuple of (node_numbers, labels) where:
+            - node_numbers: List[int] of node DFS numbers
+            - labels: List[str] of corresponding labels
+            Returns ([], []) on failure
+        """
+        msg_type, data = self.send_command(GETAONODELABELS)
+        
+        if msg_type != 1:
+            self.last_error = msg_type
+            return [], []
+        
+        if len(data) < 4:
+            self.last_error = 2
+            return [], []
+        
+        import struct
+        import numpy as np
+        
+        # Number of labels
+        num_labels = struct.unpack("<I", data[0:4])[0]
+        
+        if num_labels == 0:
+            self.last_error = 0
+            return [], []
+        
+        # Node numbers (uint32 array)
+        node_data = data[4:4 + num_labels * 4]
+        node_numbers = list(np.frombuffer(node_data, dtype=np.uint32))
+        
+        # Extract label strings
+        labels = []
+        pos = 4 + num_labels * 4
+        
+        for i in range(num_labels):
+            # Find null terminator
+            end_pos = pos
+            while end_pos < len(data) and data[end_pos] != 0:
+                end_pos += 1
+            
+            if end_pos >= len(data):
+                self.last_error = 2
+                return [], []
+            
+            # Extract label
+            label_bytes = data[pos:end_pos]
+            try:
+                label = label_bytes.decode('utf-8', errors='replace')
+            except:
+                label = ''.join(chr(b) for b in label_bytes)
+            
+            labels.append(label)
+            pos = end_pos + 1
+        
+        self.last_error = 0
+        return node_numbers, labels
+
+    def set_selected_ao_node_by_dfsnr(self, node_dfsnr: int) -> bool:
+        """
+        Select a skeleton node by its depth-first search number.
+        
+        Args:
+            node_dfsnr: DFS number of node to select
+        
+        Returns:
+            True on success, False on failure
+        """
+        payload = self._encode_uint32(node_dfsnr)
+        msg_type, data = self.send_command(SETSELECTEDAONODEBYDFSNR, payload)
+        
+        success = (msg_type == 1)
+        self.last_error = 0 if success else msg_type
+        return success
+
+    def set_selected_ao_node_by_coords(self, x: int, y: int, z: int) -> bool:
+        """
+        Select the skeleton node closest to the given coordinates.
+        
+        Args:
+            x, y, z: Coordinates in voxels (full resolution)
+        
+        Returns:
+            True on success, False on failure
+        """
+        payload = self._encode_uint32(x) + self._encode_uint32(y) + \
+                self._encode_uint32(z)
+        
+        msg_type, data = self.send_command(SETSELECTEDAONODEBYCOORDS, payload)
+        
+        success = (msg_type == 1)
+        self.last_error = 0 if success else msg_type
+        return success
+
+    def get_selected_ao_node_nr(self) -> int:
+        """
+        Get the DFS number of the currently selected skeleton node.
+        
+        Returns:
+            Node DFS number, or -1 on failure
+        """
+        msg_type, data = self.send_command(GETSELECTEDAONODENR)
+        
+        if msg_type != 1:
+            self.last_error = msg_type
+            return -1
+        
+        parsed = self.parse_payload(data)
+        uints = parsed.get("uints", [])
+        
+        if len(uints) == 1:
+            self.last_error = 0
+            return uints[0]
+        else:
+            self.last_error = 2
+            return -1
+
+    def add_ao_node(self, x: int, y: int, z: int) -> bool:
+        """
+        Add a new node to the selected skeleton.
+        
+        Args:
+            x, y, z: Coordinates for new node (full resolution voxels)
+        
+        Returns:
+            True on success, False on failure
+        """
+        payload = self._encode_uint32(x) + self._encode_uint32(y) + \
+                self._encode_uint32(z)
+        
+        msg_type, data = self.send_command(ADDAONODE, payload)
+        
+        success = (msg_type == 1)
+        self.last_error = 0 if success else msg_type
+        return success
+
+    def move_selected_ao_node(self, x: int, y: int, z: int) -> bool:
+        """
+        Move the selected skeleton node to new coordinates.
+        
+        Args:
+            x, y, z: New coordinates (full resolution voxels)
+        
+        Returns:
+            True on success, False on failure
+        """
+        payload = self._encode_uint32(x) + self._encode_uint32(y) + \
+                self._encode_uint32(z)
+        
+        msg_type, data = self.send_command(MOVESELECTEDAONODE, payload)
+        
+        success = (msg_type == 1)
+        self.last_error = 0 if success else msg_type
+        return success
+
+    def remove_selected_ao_node(self) -> bool:
+        """
+        Remove the currently selected skeleton node.
+        
+        Returns:
+            True on success, False on failure
+        """
+        msg_type, data = self.send_command(REMOVESELECTEDAONODE)
+        
+        success = (msg_type == 1)
+        self.last_error = 0 if success else msg_type
+        return success
+
+    def swap_selected_ao_node_children(self) -> bool:
+        """
+        Swap the two children of the selected skeleton node.
+        
+        Returns:
+            True on success, False on failure
+        """
+        msg_type, data = self.send_command(SWAPSELECTEDAONODECHILDREN)
+        
+        success = (msg_type == 1)
+        self.last_error = 0 if success else msg_type
+        return success
+
+    def make_selected_ao_node_root(self) -> bool:
+        """
+        Make the selected node the root of the skeleton tree.
+        
+        Returns:
+            True on success, False on failure
+        """
+        msg_type, data = self.send_command(MAKESELECTEDAONODEROOT)
+        
+        success = (msg_type == 1)
+        self.last_error = 0 if success else msg_type
+        return success
+
+    def split_selected_skeleton(self, new_root_dfsnr: int, new_name: str) -> int:
+        """
+        Split skeleton by removing parent edge and creating new skeleton.
+        
+        Args:
+            new_root_dfsnr: DFS number of node to become root of new skeleton
+            new_name: Name for the new skeleton object
+        
+        Returns:
+            ID of new skeleton object, or 0 on failure
+        """
+        payload = self._encode_uint32(new_root_dfsnr) + self._encode_text(new_name)
+        
+        msg_type, data = self.send_command(SPLITSELECTEDSKELETON, payload)
+        
+        if msg_type != 1:
+            self.last_error = msg_type
+            return 0
+        
+        parsed = self.parse_payload(data)
+        uints = parsed.get("uints", [])
+        
+        if len(uints) == 1:
+            self.last_error = 0
+            return uints[0]
+        else:
+            self.last_error = 2
+            return 0
+
+    def weld_skeletons(self, anno_object_nr1: int, node_dfsnr1: int,
+                   anno_object_nr2: int, node_dfsnr2: int) -> bool:
+        """
+        Weld two skeletons together at specified nodes.
+        
+        Replaces node1 with node2, appends node1's parent to node2's parent,
+        and removes node1's parent edge.
+        
+        Args:
+            anno_object_nr1: First skeleton object ID
+            node_dfsnr1: Node DFS number in first skeleton
+            anno_object_nr2: Second skeleton object ID
+            node_dfsnr2: Node DFS number in second skeleton
+        
+        Returns:
+            True on success, False on failure
+        """
+        payload = self._encode_uint32(anno_object_nr1) + \
+                self._encode_uint32(node_dfsnr1) + \
+                self._encode_uint32(anno_object_nr2) + \
+                self._encode_uint32(node_dfsnr2)
+        
+        msg_type, data = self.send_command(WELDSKELETONS, payload)
+        
+        success = (msg_type == 1)
+        self.last_error = 0 if success else msg_type
+        return success
+
+    def get_closest_ao_node_by_coords(self, x: int, y: int, z: int, 
+                                  max_distance: int) -> tuple:
+        """
+        Find the closest skeleton node to given coordinates.
+        
+        Args:
+            x, y, z: Query coordinates (full resolution voxels)
+            max_distance: Maximum search distance
+        
+        Returns:
+            Tuple of (anno_object_id, node_dfsnr, distance) or (-1, -1, -1) on failure
+        """
+        payload = self._encode_uint32(x) + self._encode_uint32(y) + \
+                self._encode_uint32(z) + self._encode_uint32(max_distance)
+        
+        msg_type, data = self.send_command(GETCLOSESTAONODEBYCOORDS, payload)
+        
+        if msg_type != 1:
+            self.last_error = msg_type
+            return -1, -1, -1
+        
+        parsed = self.parse_payload(data)
+        ints = parsed.get("ints", [])
+        doubles = parsed.get("doubles", [])
+        
+        if len(ints) == 2 and len(doubles) == 1:
+            self.last_error = 0
+            return ints[0], ints[1], doubles[0]
+        else:
+            self.last_error = 0
+            return -1, -1, -1
+
+
     ############################
     #   SEGMENTATION FUNCTIONS #
     ############################
@@ -771,25 +1682,6 @@ class VASTControlClass:
         else:
             self.last_error = 2
             return 0
-
-    def get_segment_name(self, segment_id: int) -> str:
-        """Get the name of a specific segment."""
-        payload = self._encode_uint32(segment_id)
-        msg_type, data = self.send_command(GETSEGMENTNAME, payload)
-        
-        if msg_type != 1:
-            self.last_error = msg_type
-            return ""
-        
-        parsed = self.parse_payload(data)
-        name = parsed.get("last_text", "")
-        
-        if name:
-            self.last_error = 0
-            return name
-        else:
-            self.last_error = 2
-            return ""
 
     def get_segment_data(self, segment_id: int) -> dict:
         """
@@ -824,6 +1716,185 @@ class VASTControlClass:
         else:
             self.last_error = 2
             return {}
+
+    def get_segment_name(self, segment_id: int) -> str:
+        """Get the name of a specific segment."""
+        payload = self._encode_uint32(segment_id)
+        msg_type, data = self.send_command(GETSEGMENTNAME, payload)
+        
+        if msg_type != 1:
+            self.last_error = msg_type
+            return ""
+        
+        parsed = self.parse_payload(data)
+        name = parsed.get("last_text", "")
+        
+        if name:
+            self.last_error = 0
+            return name
+        else:
+            self.last_error = 2
+            return ""
+
+    def set_anchor_point(self, segment_id: int, x: int, y: int, z: int) -> bool:
+        """
+        Set the anchor point of a segment.
+        
+        Args:
+            segment_id: Segment ID
+            x, y, z: Anchor coordinates in voxels (full resolution, non-negative)
+        
+        Returns:
+            True on success, False on failure
+        """
+        payload = self._encode_uint32(segment_id) + \
+                self._encode_uint32(x) + \
+                self._encode_uint32(y) + \
+                self._encode_uint32(z)
+        
+        msg_type, data = self.send_command(SETANCHORPOINT, payload)
+        
+        success = (msg_type == 1)
+        self.last_error = 0 if success else msg_type
+        return success
+
+    def set_segment_name(self, segment_id: int, name: str) -> bool:
+        """
+        Set the name of a segment.
+        
+        Args:
+            segment_id: Segment ID
+            name: New name for the segment
+        
+        Returns:
+            True on success, False on failure
+        """
+        payload = self._encode_uint32(segment_id) + self._encode_text(name)
+        
+        msg_type, data = self.send_command(SETSEGMENTNAME, payload)
+        
+        success = (msg_type == 1)
+        self.last_error = 0 if success else msg_type
+        return success
+
+    def set_segment_color_8(self, segment_id: int, r1: int, g1: int, b1: int, p1: int,
+                            r2: int, g2: int, b2: int, p2: int) -> bool:
+        """
+        Set segment colors using 8-bit RGB values.
+        
+        Args:
+            segment_id: Segment ID
+            r1, g1, b1: Primary color (0-255)
+            p1: Pattern (0-15)
+            r2, g2, b2: Secondary color (0-255)
+            p2: Secondary pattern (currently unused)
+        
+        Returns:
+            True on success, False on failure
+        """
+        # Pack colors into 32-bit values: [pattern][blue][green][red]
+        v1 = (p1 & 0xFF) | ((b1 & 0xFF) << 8) | ((g1 & 0xFF) << 16) | ((r1 & 0xFF) << 24)
+        v2 = (p2 & 0xFF) | ((b2 & 0xFF) << 8) | ((g2 & 0xFF) << 16) | ((r2 & 0xFF) << 24)
+        
+        payload = self._encode_uint32(segment_id) + \
+                self._encode_uint32(v1) + \
+                self._encode_uint32(v2)
+        
+        msg_type, data = self.send_command(SETSEGMENTCOLOR, payload)
+        
+        success = (msg_type == 1)
+        self.last_error = 0 if success else msg_type
+        return success
+
+    def set_segment_color_32(self, segment_id: int, col1: int, col2: int) -> bool:
+        """
+        Set segment colors using 32-bit color values.
+        
+        Args:
+            segment_id: Segment ID
+            col1: Primary color as 32-bit value
+            col2: Secondary color as 32-bit value
+        
+        Returns:
+            True on success, False on failure
+        """
+        payload = self._encode_uint32(segment_id) + \
+                self._encode_uint32(col1) + \
+                self._encode_uint32(col2)
+        
+        msg_type, data = self.send_command(SETSEGMENTCOLOR, payload)
+        
+        success = (msg_type == 1)
+        self.last_error = 0 if success else msg_type
+        return success
+
+    def get_all_segment_data(self) -> List[dict]:
+        """
+        Get metadata for all segments.
+        
+        Returns list of dicts, each containing segment data.
+        """
+        msg_type, data = self.send_command(GETALLSEGMENTDATA)
+        
+        if msg_type != 1:
+            self.last_error = msg_type
+            return []
+        
+        # For large data, might need chunked reading
+        if len(data) < 4:
+            self.last_error = 2
+            return []
+        
+        # Parse as uint32 array
+        arr = np.frombuffer(data, dtype=np.uint32)
+        iarr = np.frombuffer(data, dtype=np.int32)
+        
+        num_segments = arr[0]
+        segments = []
+        
+        sp = 1  # start position (0-based in Python)
+        for i in range(num_segments):
+            seg = {
+                "id": i,
+                "flags": arr[sp],
+                "col1": arr[sp + 1],
+                "col2": arr[sp + 2],
+                "anchorpoint": [int(iarr[sp + 3]), int(iarr[sp + 4]), int(iarr[sp + 5])],
+                "hierarchy": [int(arr[sp + 6]), int(arr[sp + 7]), int(arr[sp + 8]), int(arr[sp + 9])],
+                "collapsednr": arr[sp + 10],
+                "boundingbox": [int(iarr[sp + 11]), int(iarr[sp + 12]), int(iarr[sp + 13]),
+                               int(iarr[sp + 14]), int(iarr[sp + 15]), int(iarr[sp + 16])],
+            }
+            segments.append(seg)
+            sp += 17
+        
+        self.last_error = 0
+        return segments
+
+# Get all segment data matrix
+
+    def get_selected_segment_nr(self) -> int:
+        """
+        Get the currently selected segment number.
+        
+        Returns:
+            Segment ID, or -1 on failure
+        """
+        msg_type, data = self.send_command(GETSELECTEDSEGMENTNR)
+        
+        if msg_type != 1:
+            self.last_error = msg_type
+            return -1
+        
+        parsed = self.parse_payload(data)
+        uints = parsed.get("uints", [])
+        
+        if len(uints) == 1:
+            self.last_error = 0
+            return uints[0]
+        else:
+            self.last_error = 2
+            return -1
 
     def get_all_segment_names(self) -> List[str]:
         """Get names of all segments in the dataset."""
@@ -868,48 +1939,22 @@ class VASTControlClass:
         self.last_error = 0
         return names  
 
-    def get_all_segment_data(self) -> List[dict]:
+    def set_selected_segment_nr(self, segment_id: int) -> bool:
         """
-        Get metadata for all segments.
+        Select a segment.
         
-        Returns list of dicts, each containing segment data.
+        Args:
+            segment_id: Segment ID to select
+        
+        Returns:
+            True on success, False on failure
         """
-        msg_type, data = self.send_command(GETALLSEGMENTDATA)
+        payload = self._encode_int32(segment_id)
+        msg_type, data = self.send_command(SETSELECTEDSEGMENTNR, payload)
         
-        if msg_type != 1:
-            self.last_error = msg_type
-            return []
-        
-        # For large data, might need chunked reading
-        if len(data) < 4:
-            self.last_error = 2
-            return []
-        
-        # Parse as uint32 array
-        arr = np.frombuffer(data, dtype=np.uint32)
-        iarr = np.frombuffer(data, dtype=np.int32)
-        
-        num_segments = arr[0]
-        segments = []
-        
-        sp = 1  # start position (0-based in Python)
-        for i in range(num_segments):
-            seg = {
-                "id": i,
-                "flags": arr[sp],
-                "col1": arr[sp + 1],
-                "col2": arr[sp + 2],
-                "anchorpoint": [int(iarr[sp + 3]), int(iarr[sp + 4]), int(iarr[sp + 5])],
-                "hierarchy": [int(arr[sp + 6]), int(arr[sp + 7]), int(arr[sp + 8]), int(arr[sp + 9])],
-                "collapsednr": arr[sp + 10],
-                "boundingbox": [int(iarr[sp + 11]), int(iarr[sp + 12]), int(iarr[sp + 13]),
-                               int(iarr[sp + 14]), int(iarr[sp + 15]), int(iarr[sp + 16])],
-            }
-            segments.append(seg)
-            sp += 17
-        
-        self.last_error = 0
-        return segments
+        success = (msg_type == 1)
+        self.last_error = 0 if success else msg_type
+        return success
 
     def get_seg_image_raw(self, miplevel: int, minx: int, maxx: int, 
                           miny: int, maxy: int, minz: int, maxz: int,
@@ -1049,128 +2094,3 @@ class VASTControlClass:
         self.last_error = 0 if success else msg_type
         return success
     
-    ############################
-    #   ANNOTATION FUNCTIONS   #
-    ############################
-
-    def get_anno_layer_nr_of_objects(self) -> tuple:
-        """Get number of annotation objects and first object number."""
-        msg_type, data = self.send_command(GETANNOLAYERNROFOBJECTS)
-        
-        if msg_type != 1:
-            self.last_error = msg_type
-            return 0, -1
-        
-        parsed = self.parse_payload(data)
-        uints = parsed.get("uints", [])
-        
-        if len(uints) == 2:
-            self.last_error = 0
-            return uints[0], uints[1]
-        else:
-            self.last_error = 2
-            return 0, -1
-
-    def get_ao_node_data(self) -> Optional[np.ndarray]:
-        """
-        Get all skeleton node data from selected annotation layer.
-        
-        Returns numpy array with columns:
-        0: node index (DFS number)
-        1: isselected flag
-        2: edge flags
-        3: has label flag
-        4: reserved
-        5-10: parent, child1, child2, prev, next, nrofchildren (uint32, -1 means none)
-        11: radius (double)
-        12-13: x, y coordinates (uint32)
-        """
-        msg_type, data = self.send_command(GETAONODEDATA)
-        
-        if msg_type != 1:
-            self.last_error = msg_type
-            return None
-        
-        import numpy as np
-        
-        # Parse as uint32 array
-        arr = np.frombuffer(data, dtype=np.uint32)
-        
-        if len(arr) < 1:
-            self.last_error = 2
-            return None
-        
-        num_nodes = arr[0]
-        node_data = np.zeros((num_nodes, 14))
-        
-        sp = 1
-        for i in range(num_nodes):
-            node_data[i, 0] = i  # DFS number
-            node_data[i, 1] = arr[sp] & 0xFF  # isselected
-            node_data[i, 2] = (arr[sp] >> 8) & 0xFF  # edgeflags
-            node_data[i, 3] = (arr[sp] >> 16) & 0xFF  # haslabel
-            node_data[i, 4] = (arr[sp] >> 24) & 0xFF  # reserved
-            
-            # Hierarchy (convert 0xFFFFFFFF to -1)
-            for j in range(6):
-                val = arr[sp + 1 + j]
-                node_data[i, 5 + j] = -1 if val == 0xFFFFFFFF else val
-            
-            # Radius (double at position sp+7, sp+8)
-            radius_bytes = data[4 * (sp + 7):4 * (sp + 9)]
-            node_data[i, 11] = np.frombuffer(radius_bytes, dtype=np.float64)[0]
-            
-            # X, Y coordinates
-            node_data[i, 12] = arr[sp + 9]
-            node_data[i, 13] = arr[sp + 10]
-            
-            sp += 11
-        
-        self.last_error = 0
-        return node_data
-
-    def get_anno_layer_object_data(self) -> List[dict]:
-        """Get metadata for all annotation objects."""
-        msg_type, data = self.send_command(GETANNOLAYEROBJECTDATA)
-        
-        if msg_type != 1:
-            self.last_error = msg_type
-            return []
-        
-        import numpy as np
-        arr = np.frombuffer(data, dtype=np.uint32)
-        
-        if len(arr) < 1:
-            return []
-        
-        num_objects = arr[0]
-        objects = []
-        
-        sp = 1
-        for i in range(num_objects):
-            obj = {
-                "id": i + 1,
-                "type": arr[sp] & 0xFFFF,  # 0=folder, 1=skeleton
-                "flags": (arr[sp] >> 16) & 0xFFFF,
-                "col1": arr[sp + 1],
-                "col2": arr[sp + 2],
-                "anchorpoint": [arr[sp + 3], arr[sp + 4], arr[sp + 5]],
-                "hierarchy": [arr[sp + 6], arr[sp + 7], arr[sp + 8], arr[sp + 9]],
-                "collapsednr": arr[sp + 10],
-                "boundingbox": [arr[sp + 11], arr[sp + 12], arr[sp + 13], 
-                            arr[sp + 14], arr[sp + 15], arr[sp + 16]],
-            }
-            objects.append(obj)
-            sp += 21
-        
-        self.last_error = 0
-        return objects
-
-    def set_selected_anno_object_nr(self, object_id: int) -> bool:
-        """Select an annotation object by ID."""
-        payload = self._encode_uint32(object_id)
-        msg_type, data = self.send_command(SETSELECTEDANNOOBJECTNR, payload)
-        
-        success = (msg_type == 1)
-        self.last_error = 0 if success else msg_type
-        return success

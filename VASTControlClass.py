@@ -147,6 +147,7 @@ class VASTControlClass:
     #########################
     ## FUNDAMENTAL METHODS ##
     #########################
+
     def connect(self, timeout=100):
         try:
             self.client = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -1433,7 +1434,6 @@ class VASTControlClass:
             self.last_error = msg_type
             return None
         
-        import numpy as np
         
         # Parse as uint32 array
         arr = np.frombuffer(data, dtype=np.uint32)
@@ -1479,7 +1479,6 @@ class VASTControlClass:
             self.last_error = msg_type
             return []
         
-        import numpy as np
         arr = np.frombuffer(data, dtype=np.uint32)
         
         if len(arr) < 1:
@@ -1534,7 +1533,6 @@ class VASTControlClass:
             self.last_error = 2
             return []
         
-        import struct
         
         # First uint32 is number of names
         num_names = struct.unpack("<I", data[0:4])[0]
@@ -1682,8 +1680,6 @@ class VASTControlClass:
             self.last_error = 2
             return [], []
         
-        import struct
-        import numpy as np
         
         # Number of labels
         num_labels = struct.unpack("<I", data[0:4])[0]
@@ -1947,7 +1943,6 @@ class VASTControlClass:
         else:
             self.last_error = 0
             return -1, -1, -1
-
 
     ############################
     #   SEGMENTATION FUNCTIONS #
@@ -2262,7 +2257,6 @@ class VASTControlClass:
             self.last_error = 2
             return []
         
-        import struct
         
         # First uint32 is number of names
         num_names = struct.unpack("<I", data[0:4])[0]
@@ -2433,7 +2427,6 @@ class VASTControlClass:
         self.last_error = 0 if success else msg_type
         return success
 
-
     #############################
     #     2D VIEW FUNCTIONS     #
     #############################
@@ -2520,8 +2513,34 @@ class VASTControlClass:
         self.last_error = 0 if success else msg_type
         return success
 
+    def refresh_layer_region(self, layer_nr: int, minx: int, maxx: int,
+                         miny: int, maxy: int, minz: int, maxz: int) -> bool:
+        """
+        Refresh a region of a layer in the VAST display.
+        
+        Args:
+            layer_nr: Layer number to refresh
+            minx, maxx, miny, maxy, minz, maxz: Region to refresh
+        
+        Returns:
+            True on success, False on failure
+        """
+        payload = self._encode_uint32(layer_nr) + \
+                self._encode_uint32(minx) + self._encode_uint32(maxx) + \
+                self._encode_uint32(miny) + self._encode_uint32(maxy) + \
+                self._encode_uint32(minz) + self._encode_uint32(maxz)
+        
+        msg_type, data = self.send_command(REFRESHLAYERREGION, payload)
+        
+        success = (msg_type == 1)
+        self.last_error = 0 if success else msg_type
+        return success
+    
+    # set2dvieworientation not needed
 
-
+    #################################
+    # Voxel Data Transfer Functions #
+    #################################        
 
     def get_seg_image_raw(self, miplevel: int, minx: int, maxx: int, 
                           miny: int, maxy: int, minz: int, maxz: int,
@@ -2602,7 +2621,6 @@ class VASTControlClass:
         Returns:
             numpy array of shape (maxy-miny+1, maxx-minx+1, maxz-minz+1) dtype uint16
         """
-        import numpy as np
         
         rle_data = self.get_seg_image_rle(miplevel, minx, maxx, miny, maxy, minz, maxz,
                                           surf_only, immediate, request_load)
@@ -2634,6 +2652,212 @@ class VASTControlClass:
         
         return result
 
+    def get_rle_count_unique(self, miplevel: int, minx: int, maxx: int,
+                         miny: int, maxy: int, minz: int, maxz: int,
+                         surf_only: bool = False, immediate: bool = False,
+                         request_load: bool = False) -> tuple:
+        """
+        Get unique segment IDs and their voxel counts from RLE data without full decoding.
+        
+        Args:
+            miplevel: Mip level
+            minx, maxx, miny, maxy, minz, maxz: Bounding box
+            surf_only: Only get surface voxels
+            immediate: Use immediate mode
+            request_load: Request loading from disk
+        
+        Returns:
+            Tuple of (values, counts) where:
+            - values: List of segment IDs present
+            - counts: List of voxel counts for each ID
+            Returns ([], []) on failure
+        """
+        
+        rle_data = self.get_seg_image_rle(miplevel, minx, maxx, miny, maxy, minz, maxz,
+                                        surf_only, immediate, request_load)
+        
+        if rle_data is None:
+            return [], []
+        
+        rle = np.frombuffer(rle_data, dtype=np.uint16)
+        
+        if len(rle) == 0:
+            return [], []
+        
+        # Get max segment value to size accumulator
+        max_seg_val = np.max(rle[0::2])
+        counts_array = np.zeros(max_seg_val + 1, dtype=np.uint64)
+        
+        # Accumulate counts
+        for i in range(0, len(rle), 2):
+            val = rle[i]
+            count = rle[i + 1]
+            counts_array[val] += count
+        
+        # Extract non-zero entries
+        nonzero_indices = np.where(counts_array > 0)[0]
+        values = nonzero_indices.tolist()
+        counts = counts_array[nonzero_indices].tolist()
+        
+        return values, counts
+    
+    def get_seg_image_rle_decoded_count_unique(self, miplevel: int, minx: int, maxx: int,
+                                           miny: int, maxy: int, minz: int, maxz: int,
+                                           surf_only: bool = False, immediate: bool = False,
+                                           request_load: bool = False) -> tuple:
+        """
+        Get decoded RLE image along with unique segment counts.
+        
+        Returns:
+            Tuple of (seg_image, values, counts) where:
+            - seg_image: numpy array of shape (Y, X, Z)
+            - values: List of unique segment IDs
+            - counts: List of voxel counts
+            Returns (None, [], []) on failure
+        """
+        
+        rle_data = self.get_seg_image_rle(miplevel, minx, maxx, miny, maxy, minz, maxz,
+                                        surf_only, immediate, request_load)
+        
+        if rle_data is None:
+            return None, [], []
+        
+        rle = np.frombuffer(rle_data, dtype=np.uint16)
+        
+        size_x = maxx - minx + 1
+        size_y = maxy - miny + 1
+        size_z = maxz - minz + 1
+        expected_size = size_x * size_y * size_z
+        
+        # Get max value for count array
+        max_seg_val = np.max(rle[0::2])
+        counts_array = np.zeros(max_seg_val + 1, dtype=np.uint64)
+        
+        # Decode RLE and count simultaneously
+        seg_image = np.zeros(expected_size, dtype=np.uint16)
+        dp = 0
+        
+        for sp in range(0, len(rle), 2):
+            val = rle[sp]
+            count = rle[sp + 1]
+            seg_image[dp:dp + count] = val
+            counts_array[val] += count
+            dp += count
+        
+        # Reshape
+        seg_image = seg_image.reshape(size_x, size_y, size_z)
+        seg_image = np.transpose(seg_image, (1, 0, 2))
+        
+        # Extract unique values and counts
+        nonzero_indices = np.where(counts_array > 0)[0]
+        values = nonzero_indices.tolist()
+        counts = counts_array[nonzero_indices].tolist()
+        
+        return seg_image, values, counts
+    
+    def get_seg_image_rle_decoded_bboxes(self, miplevel: int, minx: int, maxx: int,
+                                     miny: int, maxy: int, minz: int, maxz: int,
+                                     surf_only: bool = False, immediate: bool = False,
+                                     request_load: bool = False) -> tuple:
+        """
+        Get decoded RLE image with bounding boxes for each segment.
+        
+        Returns:
+            Tuple of (seg_image, values, counts, bboxes) where:
+            - seg_image: numpy array of shape (Y, X, Z)
+            - values: List of unique segment IDs
+            - counts: List of voxel counts
+            - bboxes: List of bounding boxes [xmin, ymin, zmin, xmax, ymax, zmax]
+            Returns (None, [], [], []) on failure
+        """
+        
+        rle_data = self.get_seg_image_rle(miplevel, minx, maxx, miny, maxy, minz, maxz,
+                                        surf_only, immediate, request_load)
+        
+        if rle_data is None:
+            return None, [], [], []
+        
+        rle = np.frombuffer(rle_data, dtype=np.uint16)
+        
+        size_x = maxx - minx + 1
+        size_y = maxy - miny + 1
+        size_z = maxz - minz + 1
+        expected_size = size_x * size_y * size_z
+        
+        # Get max value for arrays
+        max_seg_val = np.max(rle[0::2])
+        counts_array = np.zeros(max_seg_val + 1, dtype=np.uint64)
+        bboxes_array = np.full((max_seg_val + 1, 6), -1, dtype=np.int32)
+        
+        # Decode RLE and compute bboxes simultaneously
+        seg_image = np.zeros(expected_size, dtype=np.uint16)
+        dp = 0
+        
+        for sp in range(0, len(rle), 2):
+            val = rle[sp]
+            count = int(rle[sp + 1])
+            
+            # Write to image
+            seg_image[dp:dp + count] = val
+            counts_array[val] += count
+            
+            # Compute bounding box for this run
+            start_idx = dp
+            end_idx = dp + count - 1
+            
+            # Convert linear indices to 3D coordinates
+            z1 = start_idx // (size_x * size_y)
+            r = start_idx % (size_x * size_y)
+            y1 = r // size_x
+            x1 = r % size_x
+            
+            z2 = end_idx // (size_x * size_y)
+            r = end_idx % (size_x * size_y)
+            y2 = r // size_x
+            x2 = r % size_x
+            
+            # Determine actual bbox for this run
+            xmin = min(x1, x2)
+            xmax = max(x1, x2)
+            ymin = min(y1, y2)
+            ymax = max(y1, y2)
+            zmin = min(z1, z2)
+            zmax = max(z1, z2)
+            
+            # Handle runs that span multiple planes
+            if zmax > zmin:
+                xmin, xmax = 0, size_x - 1
+                ymin, ymax = 0, size_y - 1
+            elif ymax > ymin:
+                xmin, xmax = 0, size_x - 1
+            
+            # Update segment bbox
+            if bboxes_array[val, 0] == -1:
+                # First occurrence
+                bboxes_array[val] = [xmin, ymin, zmin, xmax, ymax, zmax]
+            else:
+                # Expand existing bbox
+                bboxes_array[val, 0] = min(bboxes_array[val, 0], xmin)
+                bboxes_array[val, 1] = min(bboxes_array[val, 1], ymin)
+                bboxes_array[val, 2] = min(bboxes_array[val, 2], zmin)
+                bboxes_array[val, 3] = max(bboxes_array[val, 3], xmax)
+                bboxes_array[val, 4] = max(bboxes_array[val, 4], ymax)
+                bboxes_array[val, 5] = max(bboxes_array[val, 5], zmax)
+            
+            dp += count
+        
+        # Reshape image
+        seg_image = seg_image.reshape(size_x, size_y, size_z)
+        seg_image = np.transpose(seg_image, (1, 0, 2))
+        
+        # Extract results for non-zero segments
+        nonzero_indices = np.where(counts_array > 0)[0]
+        values = nonzero_indices.tolist()
+        counts = counts_array[nonzero_indices].tolist()
+        bboxes = bboxes_array[nonzero_indices].tolist()
+        
+        return seg_image, values, counts, bboxes
+
     def set_seg_translation(self, source_array: List[int], target_array: List[int]) -> bool:
         """
         Set segmentation translation table for image retrieval.
@@ -2660,4 +2884,498 @@ class VASTControlClass:
         success = (msg_type == 1)
         self.last_error = 0 if success else msg_type
         return success
+
+    def get_em_image_raw(self, layer_nr: int, miplevel: int, minx: int, maxx: int,
+                     miny: int, maxy: int, minz: int, maxz: int,
+                     immediate: bool = False, request_load: bool = False) -> Optional[bytes]:
+        """
+        Get raw EM/image layer data.
+        
+        Args:
+            layer_nr: Layer number
+            miplevel: Mip level
+            minx, maxx, miny, maxy, minz, maxz: Bounding box
+            immediate: Use immediate mode (don't wait for disk cache)
+            request_load: Request loading from disk if not in cache
+        
+        Returns:
+            Raw bytes (uint8), or None on failure
+        """
+        cmd = GETEMIMAGERAWIMMEDIATE if immediate else GETEMIMAGERAW
+        
+        if immediate:
+            payload = self._encode_uint32(layer_nr) + \
+                    self._encode_uint32(miplevel) + \
+                    self._encode_uint32(minx) + self._encode_uint32(maxx) + \
+                    self._encode_uint32(miny) + self._encode_uint32(maxy) + \
+                    self._encode_uint32(minz) + self._encode_uint32(maxz) + \
+                    self._encode_uint32(int(request_load))
+        else:
+            payload = self._encode_uint32(layer_nr) + \
+                    self._encode_uint32(miplevel) + \
+                    self._encode_uint32(minx) + self._encode_uint32(maxx) + \
+                    self._encode_uint32(miny) + self._encode_uint32(maxy) + \
+                    self._encode_uint32(minz) + self._encode_uint32(maxz)
+        
+        msg_type, data = self.send_command(cmd, payload)
+        
+        if msg_type != 1:
+            self.last_error = msg_type
+            return None
+        
+        self.last_error = 0
+        return data
+
+    def get_em_image(self, layer_nr: int, miplevel: int, minx: int, maxx: int,
+                    miny: int, maxy: int, minz: int, maxz: int,
+                    immediate: bool = False, request_load: bool = False) -> Optional[np.ndarray]:
+        """
+        Get EM/image layer data as numpy array with proper reshaping.
+        
+        Returns:
+            Numpy array with shape:
+            - 1 byte/pixel: (maxy-miny+1, maxx-minx+1, [maxz-minz+1])
+            - 3 bytes/pixel: (maxy-miny+1, maxx-minx+1, [maxz-minz+1], 3) RGB
+            - 4 bytes/pixel: (maxy-miny+1, maxx-minx+1, [maxz-minz+1]) uint32
+            - 8 bytes/pixel: (maxy-miny+1, maxx-minx+1, [maxz-minz+1]) uint64
+            Or None on failure
+        """
+        
+        raw_data = self.get_em_image_raw(layer_nr, miplevel, minx, maxx, miny, maxy, 
+                                        minz, maxz, immediate, request_load)
+        
+        if raw_data is None:
+            return None
+        
+        size_x = maxx - minx + 1
+        size_y = maxy - miny + 1
+        size_z = maxz - minz + 1
+        
+        # Determine bytes per pixel
+        total_voxels = size_x * size_y * size_z
+        bytes_per_pixel = len(raw_data) // total_voxels
+        
+        if bytes_per_pixel == 1:
+            # Grayscale 8-bit
+            arr = np.frombuffer(raw_data, dtype=np.uint8)
+            if minz == maxz:
+                # 2D image
+                result = arr.reshape(size_x, size_y)
+                result = np.transpose(result, (1, 0))
+            else:
+                # 3D volume
+                result = arr.reshape(size_x, size_y, size_z)
+                result = np.transpose(result, (1, 0, 2))
+        
+        elif bytes_per_pixel == 3:
+            # RGB 24-bit
+            arr = np.frombuffer(raw_data, dtype=np.uint8)
+            if minz == maxz:
+                # 2D image
+                result = arr.reshape(3, size_x, size_y)
+                result = np.transpose(result, (2, 1, 0))
+                result = np.flip(result, axis=2)  # RGB order
+            else:
+                # 3D volume
+                result = arr.reshape(3, size_x, size_y, size_z)
+                result = np.transpose(result, (2, 1, 3, 0))
+                result = np.flip(result, axis=3)  # RGB order
+        
+        elif bytes_per_pixel == 4:
+            # 32-bit
+            arr = np.frombuffer(raw_data, dtype=np.uint32)
+            if minz == maxz:
+                result = arr.reshape(size_x, size_y)
+                result = np.transpose(result, (1, 0))
+            else:
+                result = arr.reshape(size_x, size_y, size_z)
+                result = np.transpose(result, (1, 0, 2))
+        
+        elif bytes_per_pixel == 8:
+            # 64-bit
+            arr = np.frombuffer(raw_data, dtype=np.uint64)
+            if minz == maxz:
+                result = arr.reshape(size_x, size_y)
+                result = np.transpose(result, (1, 0))
+            else:
+                result = arr.reshape(size_x, size_y, size_z)
+                result = np.transpose(result, (1, 0, 2))
+        
+        else:
+            self.last_error = 2
+            return None
+        
+        return result
+
+    def get_screenshot_image_raw(self, miplevel: int, minx: int, maxx: int,
+                                miny: int, maxy: int, minz: int, maxz: int,
+                                collapse_seg: bool = False) -> Optional[bytes]:
+        """
+        Get raw screenshot image from VAST display.
+        
+        Args:
+            miplevel: Mip level
+            minx, maxx, miny, maxy, minz, maxz: Region coordinates
+            collapse_seg: If True, collapse segmentation to single color per segment
+        
+        Returns:
+            Raw RGB bytes (uint8), or None on failure
+        """
+        payload = self._encode_uint32(miplevel) + \
+                self._encode_uint32(minx) + self._encode_uint32(maxx) + \
+                self._encode_uint32(miny) + self._encode_uint32(maxy) + \
+                self._encode_uint32(minz) + self._encode_uint32(maxz) + \
+                self._encode_uint32(int(collapse_seg))
+        
+        msg_type, data = self.send_command(GETSCREENSHOTIMAGERAW, payload)
+        
+        if msg_type != 1:
+            self.last_error = msg_type
+            return None
+        
+        self.last_error = 0
+        return data
+
+    def get_screenshot_image(self, miplevel: int, minx: int, maxx: int,
+                            miny: int, maxy: int, minz: int, maxz: int,
+                            collapse_seg: bool = False, use_rle: bool = False) -> Optional[np.ndarray]:
+        """
+        Get screenshot image as numpy array.
+        
+        Args:
+            miplevel: Mip level
+            minx, maxx, miny, maxy, minz, maxz: Region coordinates
+            collapse_seg: If True, collapse segmentation to single color per segment
+            use_rle: Use RLE encoding for transfer
+        
+        Returns:
+            Numpy array of shape (maxy-miny+1, maxx-minx+1, [maxz-minz+1], 3) RGB
+            Or None on failure
+        """
+        
+        if use_rle:
+            raw_data = self.get_screenshot_image_rle(miplevel, minx, maxx, miny, maxy, 
+                                                    minz, maxz, collapse_seg)
+        else:
+            raw_data = self.get_screenshot_image_raw(miplevel, minx, maxx, miny, maxy, 
+                                                    minz, maxz, collapse_seg)
+        
+        if raw_data is None:
+            return None
+        
+        size_x = maxx - minx + 1
+        size_y = maxy - miny + 1
+        size_z = maxz - minz + 1
+        
+        arr = np.frombuffer(raw_data, dtype=np.uint8)
+        
+        if minz == maxz:
+            # 2D image
+            result = arr.reshape(3, size_x, size_y)
+            result = np.transpose(result, (2, 1, 0))
+            result = np.flip(result, axis=2)  # RGB order
+        else:
+            # 3D volume
+            result = arr.reshape(3, size_x, size_y, size_z)
+            result = np.transpose(result, (2, 1, 3, 0))
+            result = np.flip(result, axis=3)  # RGB order
+        
+        return result
+
+    def get_screenshot_image_rle(self, miplevel: int, minx: int, maxx: int,
+                                miny: int, maxy: int, minz: int, maxz: int,
+                                collapse_seg: bool = False) -> Optional[bytes]:
+        """
+        Get RLE-encoded screenshot image from VAST display.
+        
+        Args:
+            miplevel: Mip level
+            minx, maxx, miny, maxy, minz, maxz: Region coordinates
+            collapse_seg: If True, collapse segmentation to single color per segment
+        
+        Returns:
+            RLE-encoded RGB bytes, or None on failure
+        """
+        payload = self._encode_uint32(miplevel) + \
+                self._encode_uint32(minx) + self._encode_uint32(maxx) + \
+                self._encode_uint32(miny) + self._encode_uint32(maxy) + \
+                self._encode_uint32(minz) + self._encode_uint32(maxz) + \
+                self._encode_uint32(int(collapse_seg))
+        
+        msg_type, data = self.send_command(GETSCREENSHOTIMAGERLE, payload)
+        
+        if msg_type != 1:
+            self.last_error = msg_type
+            return None
+        
+        # Check if already uncompressed (RLE was same size or larger)
+        size_x = maxx - minx + 1
+        size_y = maxy - miny + 1
+        size_z = maxz - minz + 1
+        expected_size = size_x * size_y * size_z * 3
+        
+        if len(data) == expected_size:
+            # Already raw
+            self.last_error = 0
+            return data
+        
+        # Decode RLE
+        rle_data = np.frombuffer(data, dtype=np.uint8)
+        
+        decoded = np.zeros(expected_size, dtype=np.uint8)
+        dp = 0
+        
+        for sp in range(0, len(rle_data), 4):
+            if sp + 3 >= len(rle_data):
+                break
+            r = rle_data[sp]
+            g = rle_data[sp + 1]
+            b = rle_data[sp + 2]
+            count = rle_data[sp + 3]
+            
+            for i in range(count):
+                if dp + 2 < len(decoded):
+                    decoded[dp] = r
+                    decoded[dp + 1] = g
+                    decoded[dp + 2] = b
+                    dp += 3
+        
+        self.last_error = 0
+        return decoded.tobytes()
+
+    def order_screenshot_image(self, miplevel: int, minx: int, maxx: int,
+                          miny: int, maxy: int, minz: int, maxz: int,
+                          collapse_seg: bool = False) -> bool:
+        """
+        Order screenshot image (async - returns immediately).
+        Must call pickup_screenshot_image() next to receive data.
+        Do not call other API functions between order and pickup!
+        
+        Args:
+            miplevel: Mip level
+            minx, maxx, miny, maxy, minz, maxz: Region coordinates
+            collapse_seg: Collapse segmentation colors
+        
+        Returns:
+            True (command sent successfully)
+        """
+        payload = self._encode_uint32(miplevel) + \
+                self._encode_uint32(minx) + self._encode_uint32(maxx) + \
+                self._encode_uint32(miny) + self._encode_uint32(maxy) + \
+                self._encode_uint32(minz) + self._encode_uint32(maxz) + \
+                self._encode_uint32(int(collapse_seg))
+        
+        # Send command but don't wait for response
+        client = self.client
+        if client is None:
+            return False
+        
+        total_len = len(payload) + 4
+        header = b"VAST" + struct.pack("<Q", total_len) + struct.pack("<I", GETSCREENSHOTIMAGERAW)
+        message = header + payload
+        
+        client.sendall(message)
+        return True
     
+    def pickup_screenshot_image(self, miplevel: int, minx: int, maxx: int,
+                           miny: int, maxy: int, minz: int, maxz: int,
+                           collapse_seg: bool = False) -> Optional[np.ndarray]:
+        """
+        Receive screenshot image after calling order_screenshot_image().
+        Parameters must match those used in order call.
+        
+        Returns:
+            Numpy array of shape (maxy-miny+1, maxx-minx+1, [maxz-minz+1], 3) RGB
+            Or None on failure
+        """
+        
+        # Now receive the response
+        client = self.client
+        if client is None:
+            return None
+        
+        # Receive response header
+        hdr = client.recv(16)
+        if len(hdr) < 16 or not hdr.startswith(b"VAST"):
+            self.last_error = 2
+            return None
+        
+        total_len = struct.unpack("<Q", hdr[4:12])[0]
+        msg_type = struct.unpack("<I", hdr[12:16])[0]
+        
+        if msg_type != 1:
+            self.last_error = msg_type
+            return None
+        
+        expected = total_len - 4
+        payload_bytes = bytearray()
+        while len(payload_bytes) < expected:
+            chunk = client.recv(expected - len(payload_bytes))
+            if not chunk:
+                self.last_error = 2
+                return None
+            payload_bytes.extend(chunk)
+        
+        # Reshape to image
+        size_x = maxx - minx + 1
+        size_y = maxy - miny + 1
+        size_z = maxz - minz + 1
+        
+        arr = np.frombuffer(bytes(payload_bytes), dtype=np.uint8)
+        
+        if minz == maxz:
+            result = arr.reshape(3, size_x, size_y)
+            result = np.transpose(result, (2, 1, 0))
+            result = np.flip(result, axis=2)
+        else:
+            result = arr.reshape(3, size_x, size_y, size_z)
+            result = np.transpose(result, (2, 1, 3, 0))
+            result = np.flip(result, axis=3)
+        
+        self.last_error = 0
+        return result
+    
+    def set_seg_image_raw(self, miplevel: int, minx: int, maxx: int,
+                      miny: int, maxy: int, minz: int, maxz: int,
+                      seg_image: np.ndarray) -> bool:
+        """
+        Write raw segmentation image data to VAST.
+        
+        Args:
+            miplevel: Mip level to write to
+            minx, maxx, miny, maxy, minz, maxz: Bounding box
+            seg_image: Numpy array of shape (maxy-miny+1, maxx-minx+1, maxz-minz+1), dtype uint16
+        
+        Returns:
+            True on success, False on failure
+        """
+        
+        # Verify dimensions
+        expected_shape = (maxy - miny + 1, maxx - minx + 1, maxz - minz + 1)
+        if seg_image.shape != expected_shape:
+            self.last_error = 13  # Data size mismatch
+            return False
+        
+        # Transpose from (Y, X, Z) to (X, Y, Z) for transmission
+        seg_transposed = np.transpose(seg_image, (1, 0, 2))
+        
+        # Flatten and convert to bytes
+        seg_flat = seg_transposed.flatten().astype(np.uint16)
+        seg_bytes = seg_flat.tobytes()
+        
+        # Build payload
+        params = self._encode_uint32(miplevel) + \
+                self._encode_uint32(minx) + self._encode_uint32(maxx) + \
+                self._encode_uint32(miny) + self._encode_uint32(maxy) + \
+                self._encode_uint32(minz) + self._encode_uint32(maxz)
+        
+        # Add data with type tag (raw binary data)
+        payload = params + b'\x05' + len(seg_bytes).to_bytes(4, 'little') + seg_bytes
+        
+        msg_type, data = self.send_command(SETSEGIMAGERAW, payload)
+        
+        success = (msg_type == 1)
+        self.last_error = 0 if success else msg_type
+        return success
+
+    def set_seg_image_rle(self, miplevel: int, minx: int, maxx: int,
+                        miny: int, maxy: int, minz: int, maxz: int,
+                        seg_image: np.ndarray) -> bool:
+        """
+        Write RLE-encoded segmentation image data to VAST.
+        
+        Args:
+            miplevel: Mip level to write to
+            minx, maxx, miny, maxy, minz, maxz: Bounding box
+            seg_image: Numpy array of shape (maxy-miny+1, maxx-minx+1, maxz-minz+1), dtype uint16
+        
+        Returns:
+            True on success, False on failure
+        """
+        
+        # Verify dimensions
+        expected_shape = (maxy - miny + 1, maxx - minx + 1, maxz - minz + 1)
+        if seg_image.shape != expected_shape:
+            self.last_error = 13  # Data size mismatch
+            return False
+        
+        # Transpose from (Y, X, Z) to (X, Y, Z) for transmission
+        seg_transposed = np.transpose(seg_image, (1, 0, 2))
+        seg_flat = seg_transposed.flatten().astype(np.uint16)
+        
+        # RLE encode
+        rle_data = []
+        if len(seg_flat) > 0:
+            current_val = seg_flat[0]
+            count = 1
+            
+            for i in range(1, len(seg_flat)):
+                if seg_flat[i] == current_val and count < 65535:
+                    count += 1
+                else:
+                    rle_data.append(current_val)
+                    rle_data.append(count)
+                    current_val = seg_flat[i]
+                    count = 1
+            
+            # Add last run
+            rle_data.append(current_val)
+            rle_data.append(count)
+        
+        rle_array = np.array(rle_data, dtype=np.uint16)
+        
+        # Check if RLE is actually smaller
+        if len(rle_array) >= len(seg_flat):
+            # Fall back to raw
+            return self.set_seg_image_raw(miplevel, minx, maxx, miny, maxy, minz, maxz, seg_image)
+        
+        # Build payload
+        params = self._encode_uint32(miplevel) + \
+                self._encode_uint32(minx) + self._encode_uint32(maxx) + \
+                self._encode_uint32(miny) + self._encode_uint32(maxy) + \
+                self._encode_uint32(minz) + self._encode_uint32(maxz)
+        
+        rle_bytes = rle_array.tobytes()
+        payload = params + b'\x05' + len(rle_bytes).to_bytes(4, 'little') + rle_bytes
+        
+        msg_type, data = self.send_command(SETSEGIMAGERLE, payload)
+        
+        success = (msg_type == 1)
+        self.last_error = 0 if success else msg_type
+        return success
+
+    def get_pixel_value(self, layer_nr: int, miplevel: int, 
+                    x: int, y: int, z: int) -> int:
+        """
+        Get pixel value at specific coordinates.
+        
+        Args:
+            layer_nr: Layer number
+            miplevel: Mip level
+            x, y, z: Coordinates (full resolution)
+        
+        Returns:
+            Pixel value (uint64), or 0 on failure
+        """
+        payload = self._encode_uint32(layer_nr) + \
+                self._encode_uint32(miplevel) + \
+                self._encode_uint32(x) + \
+                self._encode_uint32(y) + \
+                self._encode_uint32(z)
+        
+        msg_type, data = self.send_command(GETPIXELVALUE, payload)
+        
+        if msg_type != 1:
+            self.last_error = msg_type
+            return 0
+        
+        parsed = self.parse_payload(data)
+        uint64s = parsed.get("uint64s", [])
+        
+        if len(uint64s) == 1:
+            self.last_error = 0
+            return uint64s[0]
+        else:
+            self.last_error = 2
+            return 0
+

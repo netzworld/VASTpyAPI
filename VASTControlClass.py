@@ -199,6 +199,294 @@ class VASTControlClass:
         # tag 2 + float64 LE
         return b"\x02" + struct.pack("<d", float(value))
     
+    def _decode_to_struct(self, indata: bytes) -> Tuple[Dict[str, Any], int]:
+        """
+        Decode binary data into a structured dictionary.
+        
+        Converts binary-encoded data with variable names and types into a Python dictionary.
+        Format: [name\0][type][value]... where type determines how to parse the value.
+        
+        Type codes:
+        0: uint32 (4 bytes)
+        1: int32 (4 bytes)
+        2: uint64 (8 bytes)
+        3: double (8 bytes)
+        4: string (null-terminated)
+        5: uint32 matrix (xsize, ysize, data)
+        6: int32 matrix (xsize, ysize, data)
+        7: uint64 matrix (xsize, ysize, data)
+        8: double matrix (xsize, ysize, data)
+        9: string array/cell array
+        
+        Returns: (out_dict, success) where success=1 if parsing was successful, 0 otherwise
+        """
+        out = {}
+        ptr = 0
+        data_len = len(indata)
+        
+        try:
+            while ptr < data_len:
+                # Get variable name (null-terminated string)
+                ptr2 = ptr
+                while ptr2 < data_len and indata[ptr2] != 0:
+                    ptr2 += 1
+                
+                if ptr2 >= data_len:
+                    break
+                
+                variable_name = indata[ptr:ptr2].decode('utf-8', errors='replace')
+                ptr = ptr2 + 1
+                
+                if ptr >= data_len:
+                    break
+                
+                # Get type
+                data_type = indata[ptr]
+                ptr += 1
+                
+                if data_type == 0:  # uint32
+                    if ptr + 4 > data_len:
+                        break
+                    value = struct.unpack("<I", indata[ptr:ptr+4])[0]
+                    out[variable_name] = int(value)
+                    ptr += 4
+                
+                elif data_type == 1:  # int32
+                    if ptr + 4 > data_len:
+                        break
+                    value = struct.unpack("<i", indata[ptr:ptr+4])[0]
+                    out[variable_name] = int(value)
+                    ptr += 4
+                
+                elif data_type == 2:  # uint64
+                    if ptr + 8 > data_len:
+                        break
+                    value = struct.unpack("<Q", indata[ptr:ptr+8])[0]
+                    out[variable_name] = int(value)
+                    ptr += 8
+                
+                elif data_type == 3:  # double
+                    if ptr + 8 > data_len:
+                        break
+                    value = struct.unpack("<d", indata[ptr:ptr+8])[0]
+                    out[variable_name] = value
+                    ptr += 8
+                
+                elif data_type == 4:  # character string
+                    ptr2 = ptr
+                    while ptr2 < data_len and indata[ptr2] != 0:
+                        ptr2 += 1
+                    
+                    if ptr2 >= data_len:
+                        break
+                    
+                    value = indata[ptr:ptr2].decode('utf-8', errors='replace')
+                    out[variable_name] = value
+                    ptr = ptr2 + 1
+                
+                elif data_type == 5:  # uint32 matrix
+                    if ptr + 8 > data_len:
+                        break
+                    xsize = struct.unpack("<I", indata[ptr:ptr+4])[0]
+                    ptr += 4
+                    ysize = struct.unpack("<I", indata[ptr:ptr+4])[0]
+                    ptr += 4
+                    
+                    matrix_bytes = xsize * ysize * 4
+                    if ptr + matrix_bytes > data_len:
+                        break
+                    
+                    mtx_data = struct.unpack(f"<{xsize*ysize}I", indata[ptr:ptr+matrix_bytes])
+                    mtx = np.array(mtx_data, dtype=np.uint32).reshape((ysize, xsize))
+                    out[variable_name] = mtx
+                    ptr += matrix_bytes
+                
+                elif data_type == 6:  # int32 matrix
+                    if ptr + 8 > data_len:
+                        break
+                    xsize = struct.unpack("<I", indata[ptr:ptr+4])[0]
+                    ptr += 4
+                    ysize = struct.unpack("<I", indata[ptr:ptr+4])[0]
+                    ptr += 4
+                    
+                    matrix_bytes = xsize * ysize * 4
+                    if ptr + matrix_bytes > data_len:
+                        break
+                    
+                    mtx_data = struct.unpack(f"<{xsize*ysize}i", indata[ptr:ptr+matrix_bytes])
+                    mtx = np.array(mtx_data, dtype=np.int32).reshape((ysize, xsize))
+                    out[variable_name] = mtx
+                    ptr += matrix_bytes
+                
+                elif data_type == 7:  # uint64 matrix
+                    if ptr + 8 > data_len:
+                        break
+                    xsize = struct.unpack("<I", indata[ptr:ptr+4])[0]
+                    ptr += 4
+                    ysize = struct.unpack("<I", indata[ptr:ptr+4])[0]
+                    ptr += 4
+                    
+                    matrix_bytes = xsize * ysize * 8
+                    if ptr + matrix_bytes > data_len:
+                        break
+                    
+                    mtx_data = struct.unpack(f"<{xsize*ysize}Q", indata[ptr:ptr+matrix_bytes])
+                    mtx = np.array(mtx_data, dtype=np.uint64).reshape((ysize, xsize))
+                    out[variable_name] = mtx
+                    ptr += matrix_bytes
+                
+                elif data_type == 8:  # double matrix
+                    if ptr + 8 > data_len:
+                        break
+                    xsize = struct.unpack("<I", indata[ptr:ptr+4])[0]
+                    ptr += 4
+                    ysize = struct.unpack("<I", indata[ptr:ptr+4])[0]
+                    ptr += 4
+                    
+                    matrix_bytes = xsize * ysize * 8
+                    if ptr + matrix_bytes > data_len:
+                        break
+                    
+                    mtx_data = struct.unpack(f"<{xsize*ysize}d", indata[ptr:ptr+matrix_bytes])
+                    mtx = np.array(mtx_data, dtype=np.float64).reshape((ysize, xsize))
+                    out[variable_name] = mtx
+                    ptr += matrix_bytes
+                
+                elif data_type == 9:  # array of strings (cell array)
+                    if ptr + 8 > data_len:
+                        break
+                    
+                    nrofstrings = struct.unpack("<I", indata[ptr:ptr+4])[0]
+                    ptr += 4
+                    totaltextlength = struct.unpack("<I", indata[ptr:ptr+4])[0]
+                    ptr += 4
+                    
+                    if ptr + totaltextlength > data_len:
+                        break
+                    
+                    str_data = indata[ptr:ptr+totaltextlength]
+                    ptr += totaltextlength
+                    
+                    if nrofstrings > 0:
+                        ca = []
+                        p = 0
+                        for i in range(nrofstrings):
+                            p2 = p
+                            while p2 < len(str_data) and str_data[p2] != 0:
+                                p2 += 1
+                            
+                            if p2 < len(str_data):
+                                ca.append(str_data[p:p2].decode('utf-8', errors='replace'))
+                                p = p2 + 1
+                        
+                        out[variable_name] = ca
+                
+                else:
+                    break  # Unknown type
+            
+            return out, 1
+        
+        except Exception as e:
+            return {}, 0
+    
+    def _encode_from_struct(self, indata: Dict[str, Any]) -> Tuple[bytes, int]:
+        """
+        Encode a Python dictionary into binary structured format.
+        
+        Converts a Python dictionary into binary format with variable names and types.
+        Format: [name\0][type][value]... where type indicates the data type.
+        
+        Supported Python types map to:
+        - np.uint32 or int (scalar) -> type 0
+        - np.int32 or int (scalar) -> type 1
+        - int (large) or np.int64 -> type 2
+        - float -> type 3
+        - str (scalar) -> type 4
+        - np.ndarray(uint32) -> type 5
+        - np.ndarray(int32) -> type 6
+        - np.ndarray(uint64) -> type 7
+        - np.ndarray(float64) -> type 8
+        - list/tuple (strings) -> type 9
+        
+        Returns: (bytes, success) where success=1 if encoding was successful, 0 otherwise
+        """
+        try:
+            if not isinstance(indata, dict):
+                return b"", 0
+            
+            out = bytearray()
+            
+            for key, value in indata.items():
+                key_bytes = key.encode('utf-8')
+                
+                # Handle scalar and single-value fields
+                if isinstance(value, int) and not isinstance(value, (list, np.ndarray)):
+                    # Check range to determine int type
+                    if value > 0xFFFFFFFF or value < -0x80000000:
+                        # int64/uint64
+                        out.extend(key_bytes + b'\x00\x02' + struct.pack("<Q", int(value) & 0xFFFFFFFFFFFFFFFF))
+                    elif value >= 0 and value <= 0xFFFFFFFF:
+                        # uint32
+                        out.extend(key_bytes + b'\x00\x00' + struct.pack("<I", int(value)))
+                    elif value >= -2147483648 and value <= 2147483647:
+                        # int32
+                        out.extend(key_bytes + b'\x00\x01' + struct.pack("<i", int(value)))
+                
+                elif isinstance(value, float):
+                    # double
+                    out.extend(key_bytes + b'\x00\x03' + struct.pack("<d", value))
+                
+                elif isinstance(value, str):
+                    # character string
+                    str_bytes = value.encode('utf-8')
+                    out.extend(key_bytes + b'\x00\x04' + str_bytes + b'\x00')
+                
+                elif isinstance(value, np.ndarray):
+                    # Matrix
+                    mtx = value.T if value.ndim == 2 else np.atleast_1d(value).T
+                    xsize = np.uint32(mtx.shape[0])
+                    ysize = np.uint32(mtx.shape[1])
+                    
+                    if value.dtype == np.uint32:
+                        out.extend(key_bytes + b'\x00\x05')
+                        out.extend(struct.pack("<I", xsize) + struct.pack("<I", ysize))
+                        out.extend(mtx.astype(np.uint32).tobytes())
+                    
+                    elif value.dtype == np.int32:
+                        out.extend(key_bytes + b'\x00\x06')
+                        out.extend(struct.pack("<I", xsize) + struct.pack("<I", ysize))
+                        out.extend(mtx.astype(np.int32).tobytes())
+                    
+                    elif value.dtype == np.uint64:
+                        out.extend(key_bytes + b'\x00\x07')
+                        out.extend(struct.pack("<I", xsize) + struct.pack("<I", ysize))
+                        out.extend(mtx.astype(np.uint64).tobytes())
+                    
+                    elif value.dtype == np.float64 or value.dtype == float:
+                        out.extend(key_bytes + b'\x00\x08')
+                        out.extend(struct.pack("<I", xsize) + struct.pack("<I", ysize))
+                        out.extend(mtx.astype(np.float64).tobytes())
+                
+                elif isinstance(value, (list, tuple)):
+                    # Array of strings (cell array)
+                    cstr = bytearray()
+                    nrofstrings = np.uint32(len(value))
+                    
+                    for s in value:
+                        s_bytes = str(s).encode('utf-8')
+                        cstr.extend(s_bytes + b'\x00')
+                    
+                    totaltextlength = np.uint32(len(cstr))
+                    out.extend(key_bytes + b'\x00\x09')
+                    out.extend(struct.pack("<I", nrofstrings))
+                    out.extend(struct.pack("<I", totaltextlength))
+                    out.extend(cstr)
+            
+            return bytes(out), 1
+        
+        except Exception as e:
+            return b"", 0
+    
     def send_command(self, msg_id: int, payload: bytes = b"") -> Tuple[int, bytes]:
         """
         Send a binary command to the VAST API and return the message type and response bytes.
@@ -981,9 +1269,9 @@ class VASTControlClass:
             return {}
         
         # Decode structured data
-        obj_data = self._decode_to_struct(data)
+        obj_data, success = self._decode_to_struct(data)
         
-        if obj_data is None:
+        if success != 1:
             self.last_error = 2
             return {}
         
@@ -1011,9 +1299,9 @@ class VASTControlClass:
             return {}
         
         # Decode structured data
-        node_data = self._decode_to_struct(data)
+        node_data, success = self._decode_to_struct(data)
         
-        if node_data is None:
+        if success != 1:
             self.last_error = 2
             return {}
         
@@ -1031,7 +1319,7 @@ class VASTControlClass:
         Returns:
             Object ID on success, 0 on failure
         """
-        encoded_data = self._encode_from_struct(obj_data)
+        encoded_data, success = self._encode_from_struct(obj_data)
         payload = self._encode_uint32(object_id) + encoded_data
         
         msg_type, data = self.send_command(SETANNOOBJECT, payload)
@@ -1062,7 +1350,7 @@ class VASTControlClass:
         Returns:
             New object ID, or 0 on failure
         """
-        encoded_data = self._encode_from_struct(obj_data)
+        encoded_data, success = self._encode_from_struct(obj_data)
         payload = self._encode_uint32(ref_id) + \
                 self._encode_uint32(next_or_child) + \
                 encoded_data
@@ -1096,7 +1384,7 @@ class VASTControlClass:
         Returns:
             True on success, False on failure
         """
-        encoded_data = self._encode_from_struct(node_data)
+        encoded_data, success = self._encode_from_struct(node_data)
         payload = self._encode_uint32(anno_object_id) + \
                 self._encode_uint32(node_dfsnr) + \
                 encoded_data
@@ -1871,30 +2159,96 @@ class VASTControlClass:
         self.last_error = 0
         return segments
 
-# Get all segment data matrix
-
-    def get_selected_segment_nr(self) -> int:
+    def get_all_segment_data_matrix(self) -> Tuple[Optional[np.ndarray], int]:
         """
-        Get the currently selected segment number.
+        Get metadata for all segments as a matrix.
+        
+        Same as get_all_segment_data but returns data as a 2D numpy array with one row
+        per segment and one column per data value.
+        
+        Columns are:
+        0: segment index (0-based)
+        1: flags
+        2-5: primary color RGB + pattern (8-bit values extracted from col1)
+        6-9: secondary color RGB + pattern (8-bit values extracted from col2)
+        10-12: anchorpoint (x, y, z)
+        13-16: hierarchy (parent, child1, child2, next)
+        17: collapsednr
+        18-23: boundingbox (minx, maxx, miny, maxy, minz, maxz)
         
         Returns:
-            Segment ID, or -1 on failure
+            Tuple of (matrix, success) where matrix is numpy array of shape (num_segments, 24)
+            or None on failure, and success is 1 or 0
         """
-        msg_type, data = self.send_command(GETSELECTEDSEGMENTNR)
+        msg_type, data = self.send_command(GETALLSEGMENTDATA)
         
         if msg_type != 1:
             self.last_error = msg_type
-            return -1
+            return None, 0
         
-        parsed = self.parse_payload(data)
-        uints = parsed.get("uints", [])
-        
-        if len(uints) == 1:
-            self.last_error = 0
-            return uints[0]
-        else:
+        if len(data) < 68:  # Minimum: 16 byte header + at least 1 segment (17 uint32s)
             self.last_error = 2
-            return -1
+            return None, 0
+        
+        try:
+            # Parse as uint32 and int32 arrays, starting from byte 16
+            uid = np.frombuffer(data[16:], dtype=np.uint32)
+            sid = np.frombuffer(data[16:], dtype=np.int32)
+            
+            num_segments = uid[0]
+            
+            if num_segments == 0:
+                self.last_error = 0
+                return np.zeros((0, 24), dtype=np.float64), 1
+            
+            # Create output matrix: num_segments x 24 columns
+            segdatamatrix = np.zeros((num_segments, 24), dtype=np.float64)
+            
+            sp = 1  # Start position (skip count at uid[0])
+            
+            for i in range(num_segments):
+                # Column 0: segment index (0-based)
+                segdatamatrix[i, 0] = i
+                
+                # Column 1: flags
+                segdatamatrix[i, 1] = uid[sp]
+                
+                # Columns 2-5: Extract RGB + pattern from col1 (uid[sp+1])
+                # Format: [pattern][blue][green][red]
+                segdatamatrix[i, 2] = (uid[sp + 1] >> 24) & 0xFF  # red
+                segdatamatrix[i, 3] = (uid[sp + 1] >> 16) & 0xFF  # green
+                segdatamatrix[i, 4] = (uid[sp + 1] >> 8) & 0xFF   # blue
+                segdatamatrix[i, 5] = uid[sp + 1] & 0xFF          # pattern1
+                
+                # Columns 6-9: Extract RGB + pattern from col2 (uid[sp+2])
+                segdatamatrix[i, 6] = (uid[sp + 2] >> 24) & 0xFF  # red
+                segdatamatrix[i, 7] = (uid[sp + 2] >> 16) & 0xFF  # green
+                segdatamatrix[i, 8] = (uid[sp + 2] >> 8) & 0xFF   # blue
+                segdatamatrix[i, 9] = uid[sp + 2] & 0xFF          # pattern2
+                
+                # Columns 10-12: anchorpoint (x, y, z) - signed integers
+                segdatamatrix[i, 10:13] = sid[sp + 3:sp + 6]
+                
+                # Columns 13-16: hierarchy (parent, child1, child2, next)
+                segdatamatrix[i, 13:17] = uid[sp + 6:sp + 10]
+                
+                # Column 17: collapsednr
+                segdatamatrix[i, 17] = uid[sp + 10]
+                
+                # Columns 18-23: boundingbox (minx, maxx, miny, maxy, minz, maxz) - signed
+                segdatamatrix[i, 18:24] = sid[sp + 11:sp + 17]
+                
+                sp += 17
+            
+            # Remove first row (row 0, which corresponds to segment at index -1)
+            segdatamatrix = segdatamatrix[1:, :]
+            
+            self.last_error = 0
+            return segdatamatrix, 1
+        
+        except Exception as e:
+            self.last_error = 2
+            return None, 0
 
     def get_all_segment_names(self) -> List[str]:
         """Get names of all segments in the dataset."""
@@ -1955,6 +2309,219 @@ class VASTControlClass:
         success = (msg_type == 1)
         self.last_error = 0 if success else msg_type
         return success
+
+    def get_selected_segment_nr(self) -> int:
+        """
+        Get the currently selected segment number.
+        
+        Returns:
+            Segment ID, or -1 on failure
+        """
+        msg_type, data = self.send_command(GETSELECTEDSEGMENTNR)
+        
+        if msg_type != 1:
+            self.last_error = msg_type
+            return -1
+        
+        parsed = self.parse_payload(data)
+        uints = parsed.get("uints", [])
+        
+        if len(uints) == 1:
+            self.last_error = 0
+            return uints[0]
+        else:
+            self.last_error = 2
+            return -1
+
+    def set_segment_bbox(self, segment_id: int, minx: int, maxx: int,
+                     miny: int, maxy: int, minz: int, maxz: int) -> bool:
+        """
+        Set the bounding box of a segment.
+        
+        Args:
+            segment_id: Segment ID
+            minx, maxx, miny, maxy, minz, maxz: Bounding box coordinates
+        
+        Returns:
+            True on success, False on failure
+        """
+        payload = self._encode_uint32(segment_id) + \
+                self._encode_uint32(minx) + self._encode_uint32(maxx) + \
+                self._encode_uint32(miny) + self._encode_uint32(maxy) + \
+                self._encode_uint32(minz) + self._encode_uint32(maxz)
+        
+        msg_type, data = self.send_command(SETSEGMENTBBOX, payload)
+        
+        success = (msg_type == 1)
+        self.last_error = 0 if success else msg_type
+        return success
+
+    def get_first_segment_nr(self) -> int:
+        """
+        Get the ID of the first segment in the hierarchy.
+        
+        Returns:
+            Segment ID, or -1 on failure
+        """
+        msg_type, data = self.send_command(GETFIRSTSEGMENTNR)
+        
+        if msg_type != 1:
+            self.last_error = msg_type
+            return -1
+        
+        parsed = self.parse_payload(data)
+        uints = parsed.get("uints", [])
+        
+        if len(uints) == 1:
+            self.last_error = 0
+            return uints[0]
+        else:
+            self.last_error = 2
+            return -1
+    
+    def add_segment(self, ref_id: int, next_or_child: int, name: str) -> int:
+        """
+        Add a new segment to the hierarchy.
+        
+        Args:
+            ref_id: Reference segment ID
+            next_or_child: 0=add as next sibling, 1=add as child
+            name: Name for new segment
+        
+        Returns:
+            New segment ID, or 0 on failure
+        """
+        payload = self._encode_uint32(ref_id) + \
+                self._encode_uint32(next_or_child) + \
+                self._encode_text(name)
+        
+        msg_type, data = self.send_command(ADDSEGMENT, payload)
+        
+        if msg_type != 1:
+            self.last_error = msg_type
+            return 0
+        
+        parsed = self.parse_payload(data)
+        uints = parsed.get("uints", [])
+        
+        if len(uints) == 1:
+            self.last_error = 0
+            return uints[0]
+        else:
+            self.last_error = 2
+            return 0
+
+    def move_segment(self, segment_id: int, ref_id: int, next_or_child: int) -> bool:
+        """
+        Move a segment in the hierarchy.
+        
+        Args:
+            segment_id: Segment to move
+            ref_id: Reference segment
+            next_or_child: 0=move as next sibling, 1=move as child
+        
+        Returns:
+            True on success, False on failure
+        """
+        payload = self._encode_uint32(segment_id) + \
+                self._encode_uint32(ref_id) + \
+                self._encode_uint32(next_or_child)
+        
+        msg_type, data = self.send_command(MOVESEGMENT, payload)
+        
+        success = (msg_type == 1)
+        self.last_error = 0 if success else msg_type
+        return success
+
+
+    #############################
+    #     2D VIEW FUNCTIONS     #
+    #############################
+
+    def get_view_coordinates(self) -> tuple:
+        """
+        Get current view coordinates in VAST.
+        
+        Returns:
+            Tuple of (x, y, z) in pixels at mip0, or (0, 0, 0) on failure
+        """
+        msg_type, data = self.send_command(GETVIEWCOORDINATES)
+        
+        if msg_type != 1:
+            self.last_error = msg_type
+            return 0, 0, 0
+        
+        parsed = self.parse_payload(data)
+        ints = parsed.get("ints", [])
+        
+        if len(ints) == 3:
+            self.last_error = 0
+            return ints[0], ints[1], ints[2]
+        else:
+            self.last_error = 2
+            return 0, 0, 0
+
+    def set_view_coordinates(self, x: int, y: int, z: int) -> bool:
+        """
+        Set view coordinates in VAST (navigate to position).
+        
+        Args:
+            x, y, z: Coordinates in pixels at mip0
+        
+        Returns:
+            True on success, False on failure
+        """
+        payload = self._encode_uint32(x) + self._encode_uint32(y) + \
+                self._encode_uint32(z)
+        
+        msg_type, data = self.send_command(SETVIEWCOORDINATES, payload)
+        
+        success = (msg_type == 1)
+        self.last_error = 0 if success else msg_type
+        return success
+
+    def get_view_zoom(self) -> int:
+        """
+        Get current zoom level (mip level).
+        
+        Returns:
+            Zoom level, or 0 on failure
+        """
+        msg_type, data = self.send_command(GETVIEWZOOM)
+        
+        if msg_type != 1:
+            self.last_error = msg_type
+            return 0
+        
+        parsed = self.parse_payload(data)
+        ints = parsed.get("ints", [])
+        
+        if len(ints) == 1:
+            self.last_error = 0
+            return ints[0]
+        else:
+            self.last_error = 2
+            return 0
+
+    def set_view_zoom(self, zoom: int) -> bool:
+        """
+        Set zoom level (mip level).
+        
+        Args:
+            zoom: Mip level to set
+        
+        Returns:
+            True on success, False on failure
+        """
+        payload = self._encode_int32(zoom)
+        msg_type, data = self.send_command(SETVIEWZOOM, payload)
+        
+        success = (msg_type == 1)
+        self.last_error = 0 if success else msg_type
+        return success
+
+
+
 
     def get_seg_image_raw(self, miplevel: int, minx: int, maxx: int, 
                           miny: int, maxy: int, minz: int, maxz: int,

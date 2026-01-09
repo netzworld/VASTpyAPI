@@ -17,18 +17,7 @@ def main():
 
     print("Connected successfully")
 
-    # Test basic info
-    info = vast.get_info()
-    if info:
-        print(f"Dataset size: {info['datasizex']}x{info['datasizey']}x{info['datasizez']}")
-        print(f"Voxel size: {info['voxelsizex']}, {info['voxelsizey']}, {info['voxelsizez']} nm")
-    else:
-        print("No dataset loaded")
-
-    anno = vast.get_anno_layer_nr_of_objects()
-    print(f"Number of annotation objects: {anno}")
-    an = vast.set_selected_anno_object_nr(1)
-    print(f"Set selected annotation object to 1: {an}")
+   
     
     vast.disconnect()
 

@@ -901,6 +901,41 @@ class VASTControlClass:
 
         return success
 
+    def get_data_size_at_mip(self, layer_nr: int, mip: int) -> Optional[tuple]:
+        """
+        Get the data size at a specific mip level for a given layer in VAST.
+        Corresponds to MATLAB getdatasizeatmip(layernr, miplevel).
+        """
+        xyz_size = []
+        info = self.get_info()
+        if not info:
+            return None
+        
+        msf = self.get_mipmap_scale_factors(layer_nr)
+
+        if mip >= 0 and mip < info['nrofmiplevels']:
+                if mip == 0:
+                    # Full resolution
+                    xyzsize = (
+                        float(info['datasizex']),
+                        float(info['datasizey']),
+                        float(info['datasizez'])
+                    )
+                else:
+                    # Scaled resolution
+                    if not msf or mip > len(msf):
+                        return None
+                    
+                    xyzsize = (
+                        int(float(info['datasizex']) / msf[mip - 1][0]),
+                        int(float(info['datasizey']) / msf[mip - 1][1]),
+                        int(float(info['datasizez']) / msf[mip - 1][2])
+                    )
+                
+                return xyzsize
+            
+        return None
+
     def get_mipmap_scale_factors(self, layer_nr: int) -> List[List[int]]:
         """
         Get the mipmap scale factors for a specific layer in VAST.
@@ -3383,179 +3418,175 @@ class VASTControlClass:
     # Execute VAST Functions #
     ##########################
 
-    ############################
-# EXECUTE FUNCTIONS        #
-############################
-
-def execute_fill(self, source_layer_nr: int, target_layer_nr: int,
-                 x: int, y: int, z: int, mip: int) -> bool:
-    """
-    Perform masked filling operation.
-    
-    Args:
-        source_layer_nr: Source layer for masking
-        target_layer_nr: Target segmentation layer
-        x, y, z: Seed coordinates (full resolution/mip 0)
-        mip: Mip level at which to execute fill
-    
-    Returns:
-        True on success, False on failure
-    
-    Note: This is a blocking operation that may take a long time.
-    Use filling properties set via set_filling_properties().
-    """
-    payload = self._encode_uint32(source_layer_nr) + \
-              self._encode_uint32(target_layer_nr) + \
-              self._encode_uint32(x) + \
-              self._encode_uint32(y) + \
-              self._encode_uint32(z) + \
-              self._encode_uint32(mip)
-    
-    msg_type, data = self.send_command(EXECUTEFILL, payload)
-    
-    success = (msg_type == 1)
-    self.last_error = 0 if success else msg_type
-    return success
+    def execute_fill(self, source_layer_nr: int, target_layer_nr: int,
+                    x: int, y: int, z: int, mip: int) -> bool:
+        """
+        Perform masked filling operation.
+        
+        Args:
+            source_layer_nr: Source layer for masking
+            target_layer_nr: Target segmentation layer
+            x, y, z: Seed coordinates (full resolution/mip 0)
+            mip: Mip level at which to execute fill
+        
+        Returns:
+            True on success, False on failure
+        
+        Note: This is a blocking operation that may take a long time.
+        Use filling properties set via set_filling_properties().
+        """
+        payload = self._encode_uint32(source_layer_nr) + \
+                self._encode_uint32(target_layer_nr) + \
+                self._encode_uint32(x) + \
+                self._encode_uint32(y) + \
+                self._encode_uint32(z) + \
+                self._encode_uint32(mip)
+        
+        msg_type, data = self.send_command(EXECUTEFILL, payload)
+        
+        success = (msg_type == 1)
+        self.last_error = 0 if success else msg_type
+        return success
 
 
-def execute_limited_fill(self, source_layer_nr: int, target_layer_nr: int,
-                         x: int, y: int, z: int, mip: int) -> bool:
-    """
-    Perform limited masked filling operation.
-    
-    Args:
-        source_layer_nr: Source layer for masking
-        target_layer_nr: Target segmentation layer
-        x, y, z: Seed coordinates (full resolution/mip 0)
-        mip: Mip level at which to execute fill
-    
-    Returns:
-        True on success, False on failure
-    
-    Note: Limited fill stops at certain boundaries.
-    This is a blocking operation that may take a long time.
-    """
-    payload = self._encode_uint32(source_layer_nr) + \
-              self._encode_uint32(target_layer_nr) + \
-              self._encode_uint32(x) + \
-              self._encode_uint32(y) + \
-              self._encode_uint32(z) + \
-              self._encode_uint32(mip)
-    
-    msg_type, data = self.send_command(EXECUTELIMITEDFILL, payload)
-    
-    success = (msg_type == 1)
-    self.last_error = 0 if success else msg_type
-    return success
+    def execute_limited_fill(self, source_layer_nr: int, target_layer_nr: int,
+                            x: int, y: int, z: int, mip: int) -> bool:
+        """
+        Perform limited masked filling operation.
+        
+        Args:
+            source_layer_nr: Source layer for masking
+            target_layer_nr: Target segmentation layer
+            x, y, z: Seed coordinates (full resolution/mip 0)
+            mip: Mip level at which to execute fill
+        
+        Returns:
+            True on success, False on failure
+        
+        Note: Limited fill stops at certain boundaries.
+        This is a blocking operation that may take a long time.
+        """
+        payload = self._encode_uint32(source_layer_nr) + \
+                self._encode_uint32(target_layer_nr) + \
+                self._encode_uint32(x) + \
+                self._encode_uint32(y) + \
+                self._encode_uint32(z) + \
+                self._encode_uint32(mip)
+        
+        msg_type, data = self.send_command(EXECUTELIMITEDFILL, payload)
+        
+        success = (msg_type == 1)
+        self.last_error = 0 if success else msg_type
+        return success
 
 
-def execute_canvas_paint_stroke(self, coords: np.ndarray) -> bool:
-    """
-    Perform a paint stroke on the selected segmentation layer.
-    
-    Args:
-        coords: Numpy array of shape (n, 2) with window coordinates [x, y]
-                Each row is one point in the paint stroke.
-    
-    Returns:
-        True on success, False on failure
-    
-    Note: Uses window coordinates. Region must be loaded in 2D canvas.
-    """
-    
-    if coords.ndim != 2 or coords.shape[1] != 2:
-        self.last_error = 14  # Parameter out of bounds
-        return False
-    
-    # Flatten to row-major order and convert to uint32
-    coords_flat = coords.T.flatten().astype(np.uint32)
-    coords_bytes = coords_flat.tobytes()
-    
-    # Encode dimensions and data
-    payload = self._encode_uint32(coords.shape[0]) + \
-              self._encode_uint32(coords.shape[1]) + \
-              b'\x05' + len(coords_bytes).to_bytes(4, 'little') + coords_bytes
-    
-    msg_type, data = self.send_command(EXECUTECANVASPAINTSTROKE, payload)
-    
-    success = (msg_type == 1)
-    self.last_error = 0 if success else msg_type
-    return success
+    def execute_canvas_paint_stroke(self, coords: np.ndarray) -> bool:
+        """
+        Perform a paint stroke on the selected segmentation layer.
+        
+        Args:
+            coords: Numpy array of shape (n, 2) with window coordinates [x, y]
+                    Each row is one point in the paint stroke.
+        
+        Returns:
+            True on success, False on failure
+        
+        Note: Uses window coordinates. Region must be loaded in 2D canvas.
+        """
+        
+        if coords.ndim != 2 or coords.shape[1] != 2:
+            self.last_error = 14  # Parameter out of bounds
+            return False
+        
+        # Flatten to row-major order and convert to uint32
+        coords_flat = coords.T.flatten().astype(np.uint32)
+        coords_bytes = coords_flat.tobytes()
+        
+        # Encode dimensions and data
+        payload = self._encode_uint32(coords.shape[0]) + \
+                self._encode_uint32(coords.shape[1]) + \
+                b'\x05' + len(coords_bytes).to_bytes(4, 'little') + coords_bytes
+        
+        msg_type, data = self.send_command(EXECUTECANVASPAINTSTROKE, payload)
+        
+        success = (msg_type == 1)
+        self.last_error = 0 if success else msg_type
+        return success
 
 
-def execute_start_auto_skeletonization(self, tool_layer_nr: int, mip: int,
-                                       node_distance_mu: float, node_step: int,
-                                       region_padding_mu: float) -> bool:
-    """
-    Start automatic skeletonization.
-    
-    Args:
-        tool_layer_nr: Tool layer number to use
-        mip: Mip level for processing
-        node_distance_mu: Distance between nodes in micrometers
-        node_step: Step size for node placement
-        region_padding_mu: Padding around region in micrometers
-    
-    Returns:
-        True on success, False on failure
-    
-    Note: Starts from selected node in annotation layer.
-          Requires selected node to have a parent node.
-    """
-    payload = self._encode_uint32(tool_layer_nr) + \
-              self._encode_uint32(mip) + \
-              self._encode_uint32(node_step) + \
-              self._encode_double(node_distance_mu) + \
-              self._encode_double(region_padding_mu)
-    
-    msg_type, data = self.send_command(EXECUTESTARTAUTOSKELETONIZATION, payload)
-    
-    success = (msg_type == 1)
-    self.last_error = 0 if success else msg_type
-    return success
+    def execute_start_auto_skeletonization(self, tool_layer_nr: int, mip: int,
+                                        node_distance_mu: float, node_step: int,
+                                        region_padding_mu: float) -> bool:
+        """
+        Start automatic skeletonization.
+        
+        Args:
+            tool_layer_nr: Tool layer number to use
+            mip: Mip level for processing
+            node_distance_mu: Distance between nodes in micrometers
+            node_step: Step size for node placement
+            region_padding_mu: Padding around region in micrometers
+        
+        Returns:
+            True on success, False on failure
+        
+        Note: Starts from selected node in annotation layer.
+            Requires selected node to have a parent node.
+        """
+        payload = self._encode_uint32(tool_layer_nr) + \
+                self._encode_uint32(mip) + \
+                self._encode_uint32(node_step) + \
+                self._encode_double(node_distance_mu) + \
+                self._encode_double(region_padding_mu)
+        
+        msg_type, data = self.send_command(EXECUTESTARTAUTOSKELETONIZATION, payload)
+        
+        success = (msg_type == 1)
+        self.last_error = 0 if success else msg_type
+        return success
 
 
-def execute_stop_auto_skeletonization(self) -> bool:
-    """
-    Stop the currently running auto-skeletonization.
-    
-    Returns:
-        True on success, False if not running (error code 24)
-    """
-    msg_type, data = self.send_command(EXECUTESTOPAUTOSKELETONIZATION)
-    
-    success = (msg_type == 1)
-    self.last_error = 0 if success else msg_type
-    return success
+    def execute_stop_auto_skeletonization(self) -> bool:
+        """
+        Stop the currently running auto-skeletonization.
+        
+        Returns:
+            True on success, False if not running (error code 24)
+        """
+        msg_type, data = self.send_command(EXECUTESTOPAUTOSKELETONIZATION)
+        
+        success = (msg_type == 1)
+        self.last_error = 0 if success else msg_type
+        return success
 
 
-def execute_get_auto_skeletonization_state(self) -> dict:
-    """
-    Get the current state of auto-skeletonization.
-    
-    Returns:
-        Dict with keys:
-        - isdone: 1 if completed, 0 if running
-        - iswaiting: 1 if waiting for data load, 0 otherwise
-        - nrnodesadded: Number of nodes added so far
-        Returns empty dict on failure
-    """
-    msg_type, data = self.send_command(EXECUTEISAUTOSKELETONIZATIONDONE)
-    
-    if msg_type != 1:
-        self.last_error = msg_type
-        return {}
-    
-    parsed = self.parse_payload(data)
-    uints = parsed.get("uints", [])
-    
-    if len(uints) == 3:
-        self.last_error = 0
-        return {
-            "isdone": uints[0],
-            "iswaiting": uints[1],
-            "nrnodesadded": uints[2],
-        }
-    else:
-        self.last_error = 2
-        return {}
+    def execute_get_auto_skeletonization_state(self) -> dict:
+        """
+        Get the current state of auto-skeletonization.
+        
+        Returns:
+            Dict with keys:
+            - isdone: 1 if completed, 0 if running
+            - iswaiting: 1 if waiting for data load, 0 otherwise
+            - nrnodesadded: Number of nodes added so far
+            Returns empty dict on failure
+        """
+        msg_type, data = self.send_command(EXECUTEISAUTOSKELETONIZATIONDONE)
+        
+        if msg_type != 1:
+            self.last_error = msg_type
+            return {}
+        
+        parsed = self.parse_payload(data)
+        uints = parsed.get("uints", [])
+        
+        if len(uints) == 3:
+            self.last_error = 0
+            return {
+                "isdone": uints[0],
+                "iswaiting": uints[1],
+                "nrnodesadded": uints[2],
+            }
+        else:
+            self.last_error = 2
+            return {}

@@ -2,6 +2,9 @@ import numpy as np
 from skimage import measure
 from scipy import ndimage
 from math import floor
+import re
+from typing import Tuple, List
+import time
 from VASTControlClass import VASTControlClass
 
 def get_selected_seg_layer_name():
@@ -1346,100 +1349,584 @@ def extract_surfaces(params):
     if extract_seg:
         vast.set_seg_translation([], [])
     
-
-
-
+    # last cancel == 0, doesnt exist in this case so continue inside
+    if extract_seg:
+        params['object_surface_area'] = np.zeros((objects.shape[0], 1))
+        match params['object_colors']:
+            case 1:
+                num_objects = params['objects'].shape[0]
+                colors = np.zeros((num_objects, 3))
+                for segnr in range(num_objects):
+                   seg = int(params['objects'][segnr, 0]) - 1
+                   inheritseg = int(data[seg, 17]) - 1
+                   colors[seg, :] = data[inheritseg, 2:5]
+            case 2:
+                cmap_jet = plt.get_cmap('jet', 256)
+        
+                # Calculate volume proportions
+                vol_data = vdata['data']['measurevol']['lastvolume']
+                vols = (255 * vol_data / np.max(vol_data)).astype(int)
                 
+                # Get colors from colormap (returns 0-1 range)
+                cols = cmap_jet(vols)[:, :3] 
+                
+                objs = vdata['data']['measurevol']['lastobjects'][:, 0].astype(int) - 1
+                
+                colors = np.zeros((params['objects'].shape[0], 3))
+                colors[objs, :] = cols * 255
+    else:
+        if params['extractwhich'] == 5:
+            # Create an Nx3 array of zeros
+            colors = np.zeros((params['objects'].shape[0], 3))
+            # MATLAB 1-based indexing (1,1), (2,2), (3,3) 
+            # converts to Python 0-based indexing [0,0], [1,1], [2,2]
+            colors[0, 0] = 255
+            colors[1, 1] = 255
+            colors[2, 2] = 255 
 
+        elif params['extractwhich'] in [6, 7, 8, 9]:
+            lev = params['lev'].flatten() # Ensure it's a 1D vector
+            colors = np.column_stack((lev, lev, lev))
+                
+        elif params['extractwhich'] == 10:
+            # IDs are colors in this case 
+            pass
 
-# def export_segment_meshes(miplevel=0, output_file=None):
-#     """Export segment as triangular mesh (OBJ/STL)."""
-#     vast = VASTControlClass()
-#     if not vast.connect():
-#         print("Failed to connect")
-#         return
+    # Write 3dsmax bulk loader script? vdata doesnt exist, it's used in the gui context
+    # if vdata['data']['exportobj']['write3dsmaxloader'] == 1:
+    #     # Assuming save3dsmaxloader is a defined function
+    #     save3dsmaxloader(f"{params['targetfolder']}loadallobj_here.ms")
     
-#     info = vast.get_info()
+    # merge full objects from components
+    if params['extractwhich'] == 10:
+        # np.where returns indices where condition is true; +1 if you need to keep 1-based IDs
+        indices = np.where(params['object_volume'] > 0)
+        params['objects'] = indices.reshape(-1, 1)
 
-#     # get number of segments
-#     nr_segments = vast.get_number_of_segments()
-#     if nr_segments == 0:  
-#         print("ERROR: Cannot export models from segments. No segmentation available in VAST.")
-#         return
+    # 3. Loop through objects
+    segnr = 0  # Python uses 0-based indexing
+    num_objects = params['objects'].shape
 
-#     extract_seg = True  
-
-#     # Get all segment data
-#     all_seg_data = vast.get_all_segment_data()  # Returns list of dicts
-#     names = vast.get_all_segment_names()  # Returns list of strings
-
-#     # Get selected segmentation layer
-#     selected_layers = vast.get_selected_layer_nr()
-#     if not selected_layers or selected_layers.get('selected_segment_layer', -1) < 0:
-#         print("No segment layer selected")
-#         vast.disconnect()
-#         return
-
-#     seg_layer_nr = selected_layers['selected_segment_layer']
-
-#     # Get layer info to get the name
-#     seg_layer_info = vast.get_layer_info(seg_layer_nr)
-#     if seg_layer_info:
-#         seg_layer_name = seg_layer_info['name']
-#     else:
-#         seg_layer_name = f"Layer_{seg_layer_nr}"
-
-#     # Remove background name (first entry)
-#     if names and len(names) > 0:
-#         names = names[1:]  # Remove first element (Background)
-
-#     # Get max object number
-#     max_object_number = max([seg['id'] for seg in all_seg_data]) if all_seg_data else 0
-
-#     # Get mip data size
-#     mip_data_size = vast.get_data_size_at_mip(seg_layer_nr, miplevel)
-
-
-
-#     # seg_data = vast.get_segment_data(segment_id)
-#     # if not seg_data:
-#     #     return None
     
-#     # bbox = seg_data['boundingbox']
-#     # minx, miny, minz, maxx, maxy, maxz = bbox
+    while segnr < num_objects:
+        seg = int(params['objects'][segnr, 0])
+        
+        if params['extractwhich'] == 10:
+            print(f"Exporting Surfaces ... Merging parts of object {segnr + 1} / {num_objects}...")
+            
+            # Bitwise operations for hex color string
+            r = (seg >> 16) & 255
+            g = (seg >> 8) & 255
+            b = seg & 255
+            segname = f"col_{r:02X}{g:02X}{b:02X}"
+        else:
+            # Assuming 'name' is a list of strings
+            # We subtract 1 from seg if it contains 1-based MATLAB indices
+            current_name = name[seg - 1]
+            print(f"Exporting Surfaces ... Merging parts of {current_name}...")
+            segname = current_name
+
+        # MATLAB: pause(0.01)
+        time.sleep(0.01)
+        
+        # Initialize variables for the next steps
+        cofp = []
+        covp = []
+        vofs = 0
+        
+        segnr += 1
+
+        z = 1
+        while z < params['nrztiles']:
+            y = 0
+            while y < params['nrytiles']:
+                x = 0
+                while x < params['nrxtiles']:
+                    if params['extractwhich'] == 10:
+                        # MATLAB index calculation: z*nry*nrx + y*nrx + x
+                        idx = z * params['nrytiles'] * params['nrxtiles'] + y * params['nrxtiles'] + x
+                        # MATLAB full() equivalent for sparse or dense array access
+                        blocknr = int(params['fvindex'][seg, idx])
+                        
+                        if blocknr == 0:
+                            if x == 0:
+                                f, v = [], []
+                        else:
+                            if x == 0:
+                                f = params['farray'][blocknr - 1] # -1 for 0-based indexing
+                                v = params['varray'][blocknr - 1]
+                            else:
+                                # mergemeshes must be a user-defined function in your environment
+                                f, v = mergemeshes(f, v, params['farray'][blocknr - 1], params['varray'][blocknr - 1])
+                    else:
+                        # Case where extractwhich != 10 (Cell array access)
+                        if x == 0:
+                            f = params['farray'][seg, x, y, z]
+                            v = params['varray'][seg, x, y, z]
+                        else:
+                            f, v = mergemeshes(f, v, params['farray'][seg, x, y, z], params['varray'][seg, x, y, z])
+                    x += 1
+                    
+                # Row merging logic
+                if y == 0:
+                    fc, vc = f, v
+                else:
+                    fc, vc = mergemeshes(fc, vc, f, v)
+                y += 1
+                
+            # Plane merging and optimization logic
+            if z == 0:
+                fp, vp = fc, vc
+            else:
+                fp, vp = mergemeshes(fp, vp, fc, vc)
+                
+                # Optimization: Take out non-overlapping parts
+                if len(vp) > 1 and len(fp) > 1:
+                    # MATLAB: find(vp(:,3)==max(vp(:,3)),1,'first')-1
+                    max_z = np.max(vp[:, 2])
+                    vcut = np.where(vp[:, 2] == max_z)[0][0] # first occurrence
+                    
+                    # MATLAB: find(fp > vcut, 1, 'first')
+                    fcutind = np.where(fp > vcut)[0][0]
+                    
+                    # MATLAB: ind2sub(size(fp), fcutind) -> Python: unravel_index
+                    fcut, _ = np.unravel_index(fcutind, fp.shape)
+                    
+                    # Accumulate results
+                    covp = np.vstack([covp, vp[:vcut, :]]) if 'covp' in locals() else vp[:vcut, :]
+                    vp = vp[vcut:, :]
+                    
+                    ovofs = vofs
+                    vofs += vcut
+                    
+                    cofp = np.vstack([cofp, fp[:fcut, :] + ovofs]) if 'cofp' in locals() else fp[:fcut, :] + ovofs
+                    fp = fp[fcut:, :] - vcut
+                    
+            z += 1
+        
+        if len(covp) > 0:
+            vp = np.vstack([covp, vp])
+            fp = np.vstack([cofp, fp + vofs])
+
+        # Invert Z axis if requested
+        if params['invertz']:
+            if vp.shape[0] > 0:
+                vp[:, 2] = -vp[:, 2]
+        
+        # Apply output offsets if specified
+        if params['outputoffsetx'] != 0:
+            if vp.shape[0] > 0:
+                vp[:, 0] += params['outputoffsetx']
+        if params['outputoffsety'] != 0:
+            if vp.shape[0] > 0:
+                vp[:, 1] += params['outputoffsety']
+        if params['outputoffsetz'] != 0:
+            if vp.shape[0] > 0:
+                vp[:, 2] += params['outputoffsetz']
+        
+        # Sanitize segment name
+        if extract_seg:
+            idx = np.where(data[:, 0] == seg)[0][0]
+            on = name[idx]
+        else:
+            on = segname
+        on = re.sub(r'[ ?*\\/|:<>"]', '_', on)
+
+        if (vdata['data']['exportobj']['skipmodelgeneration'] == 0) and (vp.size > 0):
+            base_name = f"{param['targetfileprefix']}_{seg:04d}_{on}"
+            filename = os.path.join(param['targetfolder'], f"{base_name}.obj")
+            
+            objectname = f"{param['targetfileprefix']}_{seg:04d}_{segname}"
+            mtlfilename = f"{base_name}.mtl"
+            mtlfilenamewithpath = filename[:-3] + "mtl"
+            materialname = f"{param['targetfileprefix']}_{seg:04d}_material"
+
+            print(f"Exporting Surfaces ... Saving {filename} as Wavefront OBJ...")
+            time.sleep(0.01)
+
+            # Call the OBJ writing function based on Z-inversion
+            if vdata['data']['exportobj']['invertz'] == 1:
+                vertface2obj_mtllink(vp, fp, filename, objectname, mtlfilename, materialname)
+            else:
+                vertface2obj_mtllink_invnormal(vp, fp, filename, objectname, mtlfilename, materialname)
+
+            # Determine Material Color
+            if param['extractwhich'] == 10:
+                # Bitwise extraction for color
+                col = [
+                    (seg >> 16) & 255,
+                    (seg >> 8) & 255,
+                    seg & 255
+                ]
+                col = [c / 255.0 for c in col]
+            else:
+                # MATLAB: colors(seg, :) -> Python 0-indexed colors[seg-1]
+                # Assumes 'colors' was calculated earlier in the script
+                col = colors[seg - 1, :] / 255.0
+
+            savematerialfile(mtlfilenamewithpath, materialname, col, 1.0, 0)
+
+        if vdata['data']['exportobj']['savesurfacestats'] == 1:
+            # Update UI/Console
+            print(f"Exporting Surfaces ... Evaluating surface area of {segname} ...")
+            time.sleep(0.01)
+
+            if vp.size > 0 and fp.size > 0:
+                # MATLAB: tnr = segnr;
+                # Use segnr as the index (ensure it matches the 0-indexed structure of param['objectsurfacearea'])
+                tnr = segnr 
+
+                # 1. Map face indices to vertex coordinates
+                # MATLAB: v0=vp(fp(tri,1),:); -> Python: vp[fp[:, 0]]
+                # We subtract 1 from fp if it contains 1-based MATLAB indices
+                f_idx = fp.astype(int) - 1 if np.min(fp) > 0 else fp.astype(int)
+                
+                v0 = vp[f_idx[:, 0]]
+                v1 = vp[f_idx[:, 1]]
+                v2 = vp[f_idx[:, 2]]
+
+                # 2. Vectorized Area Calculation
+                # Cross product of edges (v1-v0) and (v2-v0) for all triangles at once
+                # a = cross(v1-v0, v2-v0)
+                a = np.cross(v1 - v0, v2 - v0)
+
+                # 3. Magnitude and Summation
+                # Area = 0.5 * sum of magnitudes of the cross products
+                # MATLAB: sqrt(sum(a.*a))/2
+                # np.linalg.norm computes the magnitude of the vectors
+                tri_areas = np.linalg.norm(a, axis=1) / 2.0
+                
+                # Accumulate the total area for the current object
+                param['objectsurfacearea'][tnr] += np.sum(tri_areas)
+        
+        segnr += 1
     
-#     # print(f"Fetching segment {segment_id}...")
+    if vdata['data']['exportobj']['savesurfacestats'] == 1:
+        # Construct the full file path
+        filepath = os.path.join(param['targetfolder'], vdata['data']['exportobj']['surfacestatsfile'])
+        
+        try:
+            with open(filepath, 'w') as fid:
+                # Header Information
+                # MATLAB: get(vdata.fh, 'name') -> Python: Access UI title or property
+                ui_name = vdata.get('fh_name', "Unknown UI") 
+                fid.write(f"%% VastTools Surface Area Export\n")
+                fid.write(f"%% Provided as-is, no guarantee for correctness!\n")
+                fid.write(f"%% {ui_name}\n\n")
+                
+                fid.write(f"%% Source File: {seglayername}\n")
+                fid.write(f"%% Mode: {vdata['data']['exportobj']['exportmodestring']}\n")
+                
+                # Area coordinates
+                rp = rparam
+                fid.write(f"%% Area: ({rp['xmin']}-{rp['xmax']}, {rp['ymin']}-{rp['ymax']}, {rp['zmin']}-{rp['zmax']})\n")
+                
+                # Voxel size calculation
+                vx = param['xscale'] * param['xunit'] * mipfactx
+                vy = param['yscale'] * param['yunit'] * mipfacty
+                vz = param['zscale'] * param['zunit'] * vdata['data']['exportobj']['slicestep'] * mipfactz
+                fid.write(f"%% Computed at voxel size: ({vx:f},{vy:f},{vz:f})\n")
+                fid.write(f"%% Columns are: Object Name, Object ID, Surface Area in Export\n\n")
+                
+                # Loop through objects and write data
+                # MATLAB: size(param.objects, 1) -> Python: len(param['objects'])
+                for segnr in range(len(param['objects'])):
+                    seg = int(param['objects'][segnr, 0])
+                    area = param['objectsurfacearea'][segnr]
+                    
+                    if param['extractwhich'] == 10:
+                        # Bitwise color string: col_RRGGBB
+                        r = (seg >> 16) & 255
+                        g = (seg >> 8) & 255
+                        b = seg & 255
+                        segname = f"col_{r:02X}{g:02X}{b:02X}"
+                        fid.write(f'"{segname}"  {seg}  {area:f}\n')
+                    else:
+                        # MATLAB: name{seg} -> Python: name[seg-1] (assuming 1-based IDs)
+                        obj_name = name[seg - 1]
+                        fid.write(f'"{obj_name}"  {seg}  {area:f}\n')
+                
+                fid.write("\n")
+                # File is automatically closed by the 'with' block
+                
+        except IOError as e:
+            print(f"Error: Could not open or write to file {filepath}. {e}")
+
+
+def mergemeshes(f1: np.ndarray, v1: np.ndarray, f2: np.ndarray, v2: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    Merges meshes defined by (f1, v1) and (f2, v2).
+    f* are face indices (must be 1-based indices if coming from MATLAB code),
+    v* are vertex coordinates.
+    """
     
-#     # voxels = vast.get_seg_image_rle_decoded(
-#     #     miplevel=miplevel,
-#     #     minx=minx, maxx=maxx,
-#     #     miny=miny, maxy=maxy,
-#     #     minz=minz, maxz=maxz
-#     # )
+    # Handle empty input meshes
+    if v1.size == 0:
+        return f2, v2
     
-#     # if voxels is None:
-#     #     return None
+    if v2.size == 0:
+        return f1, v1
+
+    nrofvertices1 = v1.shape
     
-#     # mask = (voxels == segment_id).astype(np.uint8)
+    # Offset indices in f2 to prepare for concatenation (f2 must be 1-based here)
+    f2 = f2 + nrofvertices1
+
+    # Find overlapping vertex region bounding box
+    minv1 = np.min(v1, axis=)
+    maxv1 = np.max(v1, axis=)
+    minv2 = np.min(v2, axis=)
+    maxv2 = np.max(v2, axis=)
     
-#     # print("Running marching cubes...")
-#     # verts, faces, _, _ = measure.marching_cubes(mask, level=0.5)
+    ovmin = np.maximum(minv1, minv2)
+    ovmax = np.minimum(maxv1, maxv2)
     
-#     # # Scale to nm
-#     # scale = np.array([info['voxelsizex'], info['voxelsizey'], info['voxelsizez']])
-#     # offset = np.array([minx, miny, minz])
+
+    ov1_mask = (v1[:, 0] >= ovmin[0]) & (v1[:, 0] <= ovmax[0]) & \
+               (v1[:, 1] >= ovmin[1]) & (v1[:, 1] <= ovmax[1]) & \
+               (v1[:, 2] >= ovmin[2]) & (v1[:, 2] <= ovmax[2])
+
+    ov1 = np.hstack([np.arange(1, v1.shape + 1)[:, None], v1])[ov1_mask, :]
+
+    ov2_mask = (v2[:, 0] >= ovmin[0]) & (v2[:, 0] <= ovmax[0]) & \
+               (v2[:, 1] >= ovmin[1]) & (v2[:, 1] <= ovmax[1]) & \
+               (v2[:, 2] >= ovmin[2]) & (v2[:, 2] <= ovmax[2])
+    ov2 = np.hstack([np.arange(1, v2.shape + 1)[:, None], v2])[ov2_mask, :]
+
+
+    if ov2.size == 0:
+        return np.vstack([f1, f2]), np.vstack([v1, v2])
+
     
-#     # verts_scaled = verts * scale + offset * scale
+    v1_coords = ov1[:, 1:]
+    v2_coords = ov2[:, 1:]
     
-#     # if output_file:
-#     #     if output_file.endswith('.obj'):
-#     #         save_obj(output_file, verts_scaled, faces)
-#     #     elif output_file.endswith('.stl'):
-#     #         save_stl(output_file, verts_scaled, faces)
-#     #     print(f"Saved {output_file}")
+    # Find indices of matching coordinates
     
-#     # return verts_scaled, faces
-#     vast.disconnect()
+    
+    
+    delete_vertex = np.zeros(v2.shape, dtype=bool)
+    v2_map = np.arange(1, v2.shape + 1) # 1-based original indices of V2
+
+    # Create a dict that maps (x,y,z) tuple back to the V1 index
+    v1_map_coords = {tuple(coord): int(idx) for idx, coord in enumerate(v1, 1)}
+    
+    for i, coord in enumerate(v2):
+        if tuple(coord) in v1_map_coords:
+            v1_id = v1_map_coords[tuple(coord)]
+            v2_id = v2_map[i]
+            
+            
+            target_f2_value = v2_id + nrofvertices1
+            f2[f2 == target_f2_value] = v1_id
+            delete_vertex[i] = True # Mark the original v2 index for deletion
+
+   
+
+    # Get the indices we are keeping from v2
+    kept_indices_v2 = np.where(~delete_vertex)[0]
+    # The new indices for these kept vertices starts after V1
+    nrofvertices1 = v1.shape
+    new_indices_map = np.arange(nrofvertices1 + 1, nrofvertices1 + len(kept_indices_v2) + 1)
+    
+    
+    
+    # z = [1...nrofvertices1, 0, ..., 0] (of size nrofvertices1 + nrofvertices2)
+    z = np.arange(1, nrofvertices1 + nrofvertices2 + 1) # Full 1-based ID range
+    
+    
+    v2d = v2[~delete_vertex, :]
+    
+    
+    
+    z_map = np.zeros(nrofvertices1 + nrofvertices2 + 1, dtype=int)
+    z_map[1:nrofvertices1+1] = np.arange(1, nrofvertices1 + 1) # V1 IDs map to themselves
+    
+   
+
+    # Use a function to relabel faces:
+    def relabel_faces(faces, deleted_mask, v1_count):
+        # Create a mapping from old global indices to new global indices
+        old_indices_v2 = np.arange(v1_count + 1, v1_count + len(deleted_mask) + 1)
+        # New indices: 
+        #   First V1_count indices are fixed
+        #   Then the kept V2 indices get sequential new IDs
+        
+        # This is very messy. The easiest way is to use a sparse mapping or iteration here.
+        
+        # Let's trust the MATLAB algorithm structure is sound and use a dict map
+        
+        # Map original V1 indices (1 to N1) to final indices (1 to N1)
+        # Map original V2 indices (N1+1 to N1+N2) to final indices (N1+1 to N1+N2-DeletedCount)
+        
+        new_v2_ids = np.zeros(len(delete_vertex), dtype=int)
+        current_new_id = nrofvertices1 + 1
+        for i, is_deleted in enumerate(delete_vertex):
+            if not is_deleted:
+                new_v2_ids[i] = current_new_id
+                current_new_id += 1
+                
+        # Now use this mapping on f2 where values > nrofvertices1
+        
+        f2d = f2.copy()
+        
+        # For every face index in f2d, if it's pointing to a V2 vertex, update it
+        is_v2 = f2d > nrofvertices1
+        
+        # Map the original V2 index (adjusted for 1-based, 0-based mismatch)
+        # f2d contains indices like N1+5. We need index 5 from new_v2_ids map (index 4 in 0-based python)
+        
+        original_v2_idx_1based = f2d[is_v2] - nrofvertices1
+        original_v2_idx_0based = original_v2_idx_1based - 1
+
+        f2d[is_v2] = new_v2_ids[original_v2_idx_0based]
+
+        # Return the updated faces
+        return f2d
+    
+    f2d = relabel_faces(f2, delete_vertex, nrofvertices1)
+
+    # Combine the final results
+    f = np.vstack([f1, f2d])
+    v = np.vstack([v1, v2d])
+    
+    return f, v
+
+def vertface2obj_mtllink_invnormal(v, f, filename, objectname, mtlfilename, materialname):
+    """
+    Saves mesh as OBJ with inverted normals (flipped winding order).
+    """
+    with open(filename, 'w') as fid:
+        fid.write(f"mtllib {mtlfilename}\n")
+        fid.write(f"usemtl {materialname}\n")
+        
+        # Write vertices
+        for row in v:
+            fid.write(f"v {row[0]:f} {row[1]:f} {row[2]:f}\n")
+            
+        fid.write(f"g {objectname}\n")
+        
+        # Write faces with flipped order: f(i,2), f(i,1), f(i,3)
+        # Note: assuming f contains 1-based indices
+        for row in f:
+            fid.write(f"f {int(row[1])} {int(row[0])} {int(row[2])}\n")
+            
+        fid.write("g\n")
+
+def vertface2obj_mtllink(v, f, filename, objectname, mtlfilename, materialname):
+    """
+    Saves mesh as OBJ with standard winding order.
+    """
+    with open(filename, 'w') as fid:
+        # Header
+        fid.write(f"mtllib {mtlfilename}\n")
+        fid.write(f"usemtl {materialname}\n")
+        
+        # Write all vertices efficiently
+        # Creates a single large string block for all vertices
+        v_lines = "".join(f"v {row[0]:f} {row[1]:f} {row[2]:f}\n" for row in v)
+        fid.write(v_lines)
+        
+        fid.write(f"g {objectname}\n")
+        
+        # Write all faces efficiently
+        # Note: assuming f contains 1-based indices
+        f_lines = "".join(f"f {int(row[0])} {int(row[1])} {int(row[2])}\n" for row in f)
+        fid.write(f_lines)
+        
+        fid.write("g\n")
+
+
+"""
+def export_segment_meshes(miplevel=0, output_file=None):
+
+    vast = VASTControlClass()
+    if not vast.connect():
+        print("Failed to connect")
+        return
+    
+    info = vast.get_info()
+
+    # get number of segments
+    nr_segments = vast.get_number_of_segments()
+    if nr_segments == 0:  
+        print("ERROR: Cannot export models from segments. No segmentation available in VAST.")
+        return
+
+    extract_seg = True  
+
+    # Get all segment data
+    all_seg_data = vast.get_all_segment_data()  # Returns list of dicts
+    names = vast.get_all_segment_names()  # Returns list of strings
+
+    # Get selected segmentation layer
+    selected_layers = vast.get_selected_layer_nr()
+    if not selected_layers or selected_layers.get('selected_segment_layer', -1) < 0:
+        print("No segment layer selected")
+        vast.disconnect()
+        return
+
+    seg_layer_nr = selected_layers['selected_segment_layer']
+
+    # Get layer info to get the name
+    seg_layer_info = vast.get_layer_info(seg_layer_nr)
+    if seg_layer_info:
+        seg_layer_name = seg_layer_info['name']
+    else:
+        seg_layer_name = f"Layer_{seg_layer_nr}"
+
+    # Remove background name (first entry)
+    if names and len(names) > 0:
+        names = names[1:]  # Remove first element (Background)
+
+    # Get max object number
+    max_object_number = max([seg['id'] for seg in all_seg_data]) if all_seg_data else 0
+
+    # Get mip data size
+    mip_data_size = vast.get_data_size_at_mip(seg_layer_nr, miplevel)
+
+
+
+    # seg_data = vast.get_segment_data(segment_id)
+    # if not seg_data:
+    #     return None
+    
+    # bbox = seg_data['boundingbox']
+    # minx, miny, minz, maxx, maxy, maxz = bbox
+    
+    # print(f"Fetching segment {segment_id}...")
+    
+    # voxels = vast.get_seg_image_rle_decoded(
+    #     miplevel=miplevel,
+    #     minx=minx, maxx=maxx,
+    #     miny=miny, maxy=maxy,
+    #     minz=minz, maxz=maxz
+    # )
+    
+    # if voxels is None:
+    #     return None
+    
+    # mask = (voxels == segment_id).astype(np.uint8)
+    
+    # print("Running marching cubes...")
+    # verts, faces, _, _ = measure.marching_cubes(mask, level=0.5)
+    
+    # # Scale to nm
+    # scale = np.array([info['voxelsizex'], info['voxelsizey'], info['voxelsizez']])
+    # offset = np.array([minx, miny, minz])
+    
+    # verts_scaled = verts * scale + offset * scale
+    
+    # if output_file:
+    #     if output_file.endswith('.obj'):
+    #         save_obj(output_file, verts_scaled, faces)
+    #     elif output_file.endswith('.stl'):
+    #         save_stl(output_file, verts_scaled, faces)
+    #     print(f"Saved {output_file}")
+    
+    # return verts_scaled, faces
+    vast.disconnect()
+"""
 
 def export_skeleton(vast, anno_object_id, output_file=None):
     """
@@ -1539,7 +2026,6 @@ def save_swc(filename, nodes):
             node_id = int(node[0]) + 1  # SWC uses 1-based
             parent_id = int(node[5]) + 1 if node[5] >= 0 else -1
             f.write(f"{node_id} 0 {node[1]:.3f} {node[2]:.3f} {node[3]:.3f} {node[4]:.3f} {parent_id}\n")
-
 
 def save_stl(filename, vertices, faces):
     """Save mesh as binary STL."""

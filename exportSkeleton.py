@@ -73,6 +73,27 @@ class SurfaceExtractor:
         self.names = []
         self.data = None
 
+    def _setup_screenshot_names(self, param: Dict) -> List[str]:
+        """Setup names for screenshot extraction modes"""
+        extract_which = param.get('extractwhich', 5)
+        
+        if extract_which == 5:  # RGB 50%
+            return ['Red Layer', 'Green Layer', 'Blue Layer']
+        elif extract_which == 6:  # Brightness 50%
+            param['lev'] = 128
+            return ['Brightness 128']
+        elif extract_which == 7:  # 16 levels
+            param['lev'] = list(range(8, 257, 16))
+            return [f'B{lev:03d}' for lev in param['lev']]
+        elif extract_which == 8:  # 32 levels
+            param['lev'] = list(range(4, 257, 8))
+            return [f'B{lev:03d}' for lev in param['lev']]
+        elif extract_which == 9:  # 64 levels
+            param['lev'] = list(range(2, 257, 4))
+            return [f'B{lev:03d}' for lev in param['lev']]
+        else:
+            return []
+
     def extract_surfaces(self):
         """
         Extract 3D surfaces from VAST segmentation or screenshot data.
@@ -100,145 +121,136 @@ class SurfaceExtractor:
         if 5 <= param.get('extractwhich', 1) <= 10:
             extract_seg = False
 
+
         if extract_seg:
             # ===== SEGMENTATION EXPORT =====
-            nr_segments = vast.get_number_of_segments()
-            if nr_segments == 0:
-                print("ERROR: Cannot export models from segments. No segmentation available.")
+            data, res = self.vast.get_all_segment_data_matrix()
+            if data is None:
+                print("Did not get data from segment data matrix")
+                return
+            names, res = self.vast.get_all_segment_names()
+            if names is None: 
+                print("Did not get segment names")
+                return
+            seg_layer_name = self.vast.get_all_segment_names()
+            if seg_layer_name is None: 
+                print("Did not get segment layer name")
                 return
             
+            names = names[1:] # Remove background name
+
+            max_object_number = int(np.max(data[:, 0]))
+            
             # Get segment data
-            all_seg_data = vast.get_all_segment_data()
+            all_seg_data = self.vast.get_all_segment_data()
             if all_seg_data is None:
                 print("Failed to get segment data")
                 return
-            names = vast.get_all_segment_names()
+            names = self.vast.get_all_segment_names()
             
             # Get selected layer
-            selected_layers = vast.get_selected_layer_nr()
+            selected_layers = self.vast.get_selected_layer_nr()
             if not selected_layers or selected_layers.get('selected_segment_layer', -1) < 0:
                 print("No segment layer selected")
                 return
             
-            seg_layer_nr = selected_layers['selected_segment_layer']
-            if seg_layer_nr < 0:
+            selected_seg_layer_nr = selected_layers['selected_segment_layer']
+            if selected_seg_layer_nr < 0:
                 print("No segment layer selected")
                 return
             selected_em_layer_nr = selected_layers.get('selected_em_layer', -1)
 
-            # Get layer name
-            seg_layer_info = vast.get_layer_info(seg_layer_nr)
-            seg_layer_name = seg_layer_info['name'] if seg_layer_info else f"Layer_{seg_layer_nr}"
-            
-            # Remove background
-            if names and len(names) > 0:
-                names = names[1:]
-            
-            # Get max object number
-            max_object_number = max([seg['id'] for seg in all_seg_data]) if all_seg_data else 0
-            
-            # Get data size at mip level
-            mip_data_size = vast.get_data_size_at_mip(params['miplevel'], seg_layer_nr)
-            
-            
+            mip_data_size = self.vast.get_data_size_at_mip(param['miplevel'], selected_seg_layer_nr)
         else:
-            names = []
-            seg_layer_nr = -1
-            selected_em_layer_nr = -1
-            extract_which = params['extractwhich']
+            # ===== SCREENSHOT EXPORT =====
+            names = self._setup_screenshot_names(param)
+
+            selected_layers = self.vast.get_selected_layer_nr()
+
+            if not selected_layers or selected_layers.get('selected_segment_layer', -1) < 0:
+                print("No segment layer selected")
+                return
             
-            if extract_which == 5:
-                # RGB 50% isosurfaces
-                names = ['Red Layer', 'Green Layer', 'Blue Layer']
-                
-            elif extract_which == 6:
-                # Brightness 50%
-                params['lev'] = [128]
-                names = ['Brightness 128']
-                
-            elif extract_which == 7:
-                # 16 brightness levels
-                params['lev'] = list(range(8, 257, 16))  # 8, 24, 40, ..., 248
-                names = [f'B{lev:03d}' for lev in params['lev']]
-                
-            elif extract_which == 8:
-                # 32 brightness levels
-                params['lev'] = list(range(4, 257, 8))  # 4, 12, 20, ..., 252
-                names = [f'B{lev:03d}' for lev in params['lev']]
-                
-            elif extract_which == 9:
-                # 64 brightness levels
-                params['lev'] = list(range(2, 257, 4))  # 2, 6, 10, ..., 254
-                names = [f'B{lev:03d}' for lev in params['lev']]
-                
-            elif extract_which == 10:
-                # One object per color (up to 2^24 objects)
-                # This will be determined later from actual screenshot data
-                names = []
-                # colorcounts would be allocated when processing screenshot data
+            selected_seg_layer_nr = selected_layers['selected_segment_layer']
 
-        selected_layers = vast.get_selected_layer_nr()
-        if not selected_layers:
-            print("Failed to get selected layers")
-            return
+            if selected_seg_layer_nr < 0:
+                print("No segment layer selected")
+                return
+            selected_em_layer_nr = selected_layers.get('selected_em_layer', -1)
 
-        selected_layer_nr = selected_layers['selected_layer']
-        selected_em_layer_nr = selected_layers['selected_em_layer']
-        selected_segment_layer_nr = selected_layers['selected_segment_layer']
 
         # Initialize Z scaling
-        zscale = 1
-        zmin = params['zmin']
-        zmax = params['zmax']
+        z_scale = 1
+        z_min = rparam['zmin']
+        z_max = rparam['zmax']
+
+        if param['miplevel'] > 0:
+            if extract_seg:
+                mip_scale_matrix = self.vast.get_mipmap_scale_factors(selected_seg_layer_nr)
+            else:
+                mip_scale_matrix = self.vast.get_mipmap_scale_factors(selected_em_layer_nr)
+            
+            z_scale = mip_scale_matrix[param['miplevel']][2]
+            
+            if z_scale != 1:
+                z_min = floor(z_min / z_scale)
+                z_max = floor(z_max / z_scale)
+        else:
+            mip_scale_matrix = None
 
         # Apply mip level scaling
-        mip_scale_matrix = None
-        if params['miplevel'] > 0:
-            # Get mip scale factors from appropriate layer
-            if extract_seg:
-                mip_scale_matrix = vast.get_mipmap_scale_factors(selected_segment_layer_nr)
-            else:
-                mip_scale_matrix = vast.get_mipmap_scale_factors(selected_em_layer_nr)
-            
-            if mip_scale_matrix and params['miplevel'] <= len(mip_scale_matrix):
-                # Get Z scale factor for this mip level
-                zscale = mip_scale_matrix[params['miplevel'] - 1][2]  # 0-based indexing
-            else:
-                zscale = 1
-            
-            # Scale Z coordinates if needed
-            if zscale != 1:
-                zmin = int(zmin / zscale)
-                zmax = int(zmax / zscale)
-        xmin = params['xmin'] >> params['miplevel']  # Right bitshift
-        xmax = (params['xmax'] >> params['miplevel']) - 1
-        ymin = params['ymin'] >> params['miplevel']
-        ymax = (params['ymax'] >> params['miplevel']) - 1
+        
+        x_min = rparam['xmin'] >> param['miplevel']
+        x_max = (rparam['xmax'] >> param['miplevel']) - 1
+        y_min = rparam['ymin'] >> param['miplevel']
+        y_max = (rparam['ymax'] >> param['miplevel']) - 1
 
         # Get mip scale factors
-        if params['miplevel'] > 0:
-            if mip_scale_matrix and params['miplevel'] <= len(mip_scale_matrix):
-                mipfactx = mip_scale_matrix[params['miplevel'] - 1][0]
-                mipfacty = mip_scale_matrix[params['miplevel'] - 1][1]
-                mipfactz = mip_scale_matrix[params['miplevel'] - 1][2]
-            else:
-                mipfactx = 1
-                mipfacty = 1
-                mipfactz = 1
+        if param['miplevel'] > 0:
+            mip_fact_x = mip_scale_matrix[param['miplevel']][0]
+            mip_fact_y = mip_scale_matrix[param['miplevel']][1]
+            mip_fact_z = mip_scale_matrix[param['miplevel']][2]
         else:
-            mipfactx = 1
-            mipfacty = 1
-            mipfactz = 1
+            mip_fact_x = 1
+            mip_fact_y = 1
+            mip_fact_z = 1
 
-        # Validation: check if volume is large enough
-        if ((xmin == xmax) or (ymin == ymax) or (zmin == zmax)) and not params['closesurfaces']:
-            print("ERROR: The surface extraction needs a volume which is at least two pixels "
-                    "wide in each direction. Please adjust region values, or enable 'closesurfaces'.")
+        # Validate volume dimensions
+        if ((x_min == x_max or y_min == y_max or z_min == z_max) and 
+            param.get('closesurfaces', 0) == 0):
+            print(
+                'ERROR: The surface script needs a volume which is at least ',
+                'two pixels wide in each direction. Please adjust "Render from area" ',
+                'values, or enable "Close surface sides".',
+            )
+            print('Canceled.')
             return
-
+        
+        # Store processed parametersQ
+        self.param = {
+            'extract_seg': extract_seg,
+            'names': names,
+            'xmin': x_min,
+            'xmax': x_max,
+            'ymin': y_min,
+            'ymax': y_max,
+            'zmin': z_min,
+            'zmax': z_max,
+            'mipfactx': mip_fact_x,
+            'mipfacty': mip_fact_y,
+            'mipfactz': mip_fact_z,
+            **param
+        }
         objects = None
 
         if extract_seg:
+            self.data = data
+            self.param['max_object_number'] = max_object_number
+            self.param['mip_data_size'] = mip_data_size
+            self.param['seg_layer_name'] = seg_layer_name
+        
+        print(f"Initialization complete. Extract mode: {'segmentation' if extract_seg else 'screenshots'}")
+
             # Compute full name (including folder names) from name and hierarchy
             if params['includefoldernames'] and all_seg_data is not None:
                 fullname = names.copy()
@@ -274,10 +286,10 @@ class SurfaceExtractor:
                     objects = [(seg['id'], seg['flags']) for seg in all_seg_data]
                 else:
                     objects = []
-                vast.set_seg_translation([], [])
+                self.vast.set_seg_translation([], [])
             
             elif extract_which == 2:
-                # All segments, collapsed as in VAST
+                # All segments, collapsed as in self.vast
                 # Get unique collapsed IDs
                 if all_seg_data:
                     collapsed_ids = list(set(seg['collapsednr'] for seg in all_seg_data))
@@ -286,7 +298,7 @@ class SurfaceExtractor:
                     # Set translation: map all segment IDs to their collapsed IDs
                     source_array = [seg['id'] for seg in all_seg_data]
                     target_array = [seg['collapsednr'] for seg in all_seg_data]
-                    vast.set_seg_translation(source_array, target_array)
+                    self.vast.set_seg_translation(source_array, target_array)
                 else:
                     objects = []
             
@@ -314,10 +326,10 @@ class SurfaceExtractor:
                     
                     # Set translation to only show selected
                     selected_ids = [all_seg_data[i]['id'] for i in selected_with_children]
-                    vast.set_seg_translation(selected_ids, selected_ids)
+                    self.vast.set_seg_translation(selected_ids, selected_ids)
             
             elif extract_which == 4:
-                # Selected segment and children, collapsed as in VAST
+                # Selected segment and children, collapsed as in self.vast
                 # Find selected segments
                 selected = [i for i, seg in enumerate(all_seg_data) 
                             if seg['flags'] & 65536] if all_seg_data else []
@@ -344,7 +356,7 @@ class SurfaceExtractor:
                 # Set translation
                 source_array = [all_seg_data[i]['id'] for i in selected_indices]
                 target_array = [all_seg_data[i]['collapsednr'] for i in selected_indices]
-                vast.set_seg_translation(source_array, target_array)
+                self.vast.set_seg_translation(source_array, target_array)
 
         nrxtiles = 0
         tilex1 = xmin
@@ -412,25 +424,25 @@ class SurfaceExtractor:
             if extract_seg:
                 # Load complete region of segmentation source layer at constraint mip level (vdata.data.exportobj.mipregionmip equals param.mipregionmip)
                 if params['slicestep'] == 1:
-                    mcsegimage, values, counts, bboxes = vast.get_seg_image_rle_decoded_bboxes(
+                    mcsegimage, values, counts, bboxes = self.vast.get_seg_image_rle_decoded_bboxes(
                         params['mipregionmip'], cxmin, cxmax, cymin, cymax, czmin, czmax, False)
                 else:
                     s = list(range(czmin, czmax + 1, params['slicestep']))
                     mcsegimage = np.zeros((cxmax - cxmin + 1, cymax - cymin + 1, len(s)), dtype=int)
                     for i, z in enumerate(s):
-                        mcsegslice, values, counts, bboxes = vast.get_seg_image_rle_decoded_bboxes(
+                        mcsegslice, values, counts, bboxes = self.vast.get_seg_image_rle_decoded_bboxes(
                             params['mipregionmip'], cxmin, cxmax, cymin, cymax, z, z, False)
                         mcsegimage[:, :, z] = mcsegslice
             else:
                 if params['slicestep'] == 1:
-                    mcsegimage = vast.get_screenshot_image(params['mipregionmip'], cxmin, cxmax, cymin, cymax, czmin, czmax, False)
+                    mcsegimage = self.vast.get_screenshot_image(params['mipregionmip'], cxmin, cxmax, cymin, cymax, czmin, czmax, False)
                     if mcsegimage is not None and mcsegimage.ndim == 4:
                         mcsegimage = np.transpose(np.sum(mcsegimage, axis=3) > 0, (1, 0, 2))
                 else:
                     s = list(range(czmin, czmax + 1, params['slicestep']))
                     mcsegimage = np.zeros((cxmax - cxmin + 1, cymax - cymin + 1, len(s)), dtype=int)
                     for i, z in enumerate(s):
-                        mcsegslice = vast.get_screenshot_image(params['mipregionmip'], cxmin, cxmax, cymin, cymax, z, z, False)
+                        mcsegslice = self.vast.get_screenshot_image(params['mipregionmip'], cxmin, cxmax, cymin, cymax, z, z, False)
                         if mcsegslice is not None and mcsegslice.ndim == 4:
                             mcsegimage[:, :, z] = np.transpose(np.sum(mcsegslice, axis=3) > 0, (1, 0))
                         else:
@@ -563,7 +575,7 @@ class SurfaceExtractor:
                                 edx = np.zeros((3,2), dtype=int)
                             
                             if params['slicestep'] == 1:
-                                seg_image, values, counts, bboxes = vast.get_seg_image_rle_decoded_bboxes(params['miplevel'], tilex1-int(edx[0,0]),tilex2+int(edx[0,1]),tiley1-int(edx[1,0]),tiley2+int(edx[1,1]),tilez1-int(edx[2,0]),tilez2+int(edx[2,1]), False)
+                                seg_image, values, counts, bboxes = self.vast.get_seg_image_rle_decoded_bboxes(params['miplevel'], tilex1-int(edx[0,0]),tilex2+int(edx[0,1]),tiley1-int(edx[1,0]),tiley2+int(edx[1,1]),tilez1-int(edx[2,0]),tilez2+int(edx[2,1]), False)
                             else:
                                 bs = blockslicenumbers[tz]
                                 if edx[2,0] == 1:
@@ -579,7 +591,7 @@ class SurfaceExtractor:
                                 firstblockslice = bs[0]
 
                                 for i, slice_z in enumerate(bs):
-                                    ssegimage, svalues, snumbers, sbboxes = vast.get_seg_image_rle_decoded_bboxes(
+                                    ssegimage, svalues, snumbers, sbboxes = self.vast.get_seg_image_rle_decoded_bboxes(
                                         params['miplevel'], 
                                         tilex1 - int(edx[0,0]), tilex2 + int(edx[0,1]),
                                         tiley1 - int(edx[1,0]), tiley2 + int(edx[1,1]),
@@ -664,7 +676,7 @@ class SurfaceExtractor:
                         if not params['usemipregionconstraint'] or mc_loadflags[tx, ty, tz]:
                             # Read this cube
                             if params['slicestep'] == 1:
-                                scsimage = vast.get_screenshot_image(params['miplevel'], tilex1, tilex2, tiley1, tiley2, tilez1, tilez2, True, True)
+                                scsimage = self.vast.get_screenshot_image(params['miplevel'], tilex1, tilex2, tiley1, tiley2, tilez1, tilez2, True, True)
                                 if tilez1 == tilez2:
                                     # in this case a 3d array will be returned, but a 4d array with singular dimension 3 is expected below.
                                     scsimage = scsimage.reshape(scsimage.shape[0], scsimage.shape[1], 1, scsimage.shape[2])
@@ -676,7 +688,7 @@ class SurfaceExtractor:
                                                         3), dtype=np.uint8)
                                 firstblockslice = bs[0]
                                 for i, slice_z in enumerate(bs):
-                                    scslice = vast.get_screenshot_image(
+                                    scslice = self.vast.get_screenshot_image(
                                         params['miplevel'],
                                         tilex1, tilex2,
                                         tiley1, tiley2,
@@ -693,7 +705,7 @@ class SurfaceExtractor:
                         if not params['usemipregionconstraint'] or mc_loadflags[tx, ty, tz]:
                             print(f"Processing Segmentation Cubes {tx,ty,tz} of {nrxtiles,nrytiles,nrztiles}...")
                             if seg_image is None or len(values) == 0 or len(bboxes) == 0:
-                                print(f"  Skipping tile {tx,ty,tz} - no segment data returned from VAST API")
+                                print(f"  Skipping tile {tx,ty,tz} - no segment data returned from self.vast API")
                                 
                             
                             values = np.array(values)
@@ -715,7 +727,7 @@ class SurfaceExtractor:
 
 
                             if len(values_f) > 0:
-                                #  VAST translates voxel data before transmission 
+                                #  self.vast translates voxel data before transmission 
                                 xvofs = 0
                                 yvofs = 0
                                 zvofs = 0
@@ -1246,7 +1258,7 @@ class SurfaceExtractor:
                 
                 # Save model if it has geometry
                 if not params.get('skipmodelgeneration', False) and vp.shape[0] > 0:
-                    output_folder = params.get('targetfolder', './vast_export')
+                    output_folder = params.get('targetfolder', './self.vast_export')
                     output_prefix = params.get('targetfileprefix', 'Segment_')
                     
                     # Ensure output folder exists
@@ -1288,7 +1300,7 @@ class SurfaceExtractor:
                     object_surface_area[obj_idx] = surface_area
 
         if extract_seg:
-            vast.set_seg_translation([], [])
+            self.vast.set_seg_translation([], [])
 
         # last cancel == 0, doesnt exist in this case so continue inside
         if extract_seg:
@@ -1551,7 +1563,7 @@ class SurfaceExtractor:
                     # Header Information
                     # MATLAB: get(vdata.fh, 'name') -> Python: Access UI title or property
                     ui_name = vdata.get('fh_name', "Unknown UI") 
-                    fid.write(f"%% VastTools Surface Area Export\n")
+                    fid.write(f"%% self.vastTools Surface Area Export\n")
                     fid.write(f"%% Provided as-is, no guarantee for correctness!\n")
                     fid.write(f"%% {ui_name}\n\n")
                     
@@ -1764,24 +1776,24 @@ def vertface2obj_mtllink(v, f, filename, objectname, mtlfilename, materialname):
         
         fid.write("g\n")
 
-def export_skeleton(vast, anno_object_id, output_file=None):
+def export_skeleton(self.vast, anno_object_id, output_file=None):
     """
     Export skeleton as SWC or OBJ line mesh.
     
     Returns: (nodes, edges) where nodes has columns [id, x, y, z, radius, parent_id]
     """
     
-    info = vast.get_info()
+    info = self.vast.get_info()
     if not info:
         return None
     
     # Select the annotation object
-    if not vast.set_selected_anno_object_nr(anno_object_id):
+    if not self.vast.set_selected_anno_object_nr(anno_object_id):
         print(f"Failed to select annotation object {anno_object_id}")
         return None
     
     # Get node data
-    node_data = vast.get_ao_node_data()
+    node_data = self.vast.get_ao_node_data()
     if node_data is None:
         print("Failed to get node data")
         return None

@@ -143,6 +143,7 @@ class VASTControlClass:
         self.port                            = port
         self.client: Optional[socket.socket] = None
         self.last_error                      = 0
+        self.set_error_popups_enabled        = ()
     
     #########################
     ## FUNDAMENTAL METHODS ##

@@ -143,7 +143,6 @@ class VASTControlClass:
         self.port                            = port
         self.client: Optional[socket.socket] = None
         self.last_error                      = 0
-        self.set_error_popups_enabled        = ()
     
     #########################
     ## FUNDAMENTAL METHODS ##
@@ -714,6 +713,22 @@ class VASTControlClass:
         """Query VAST for the most recent error code (like MATLAB getlasterror)."""
         return self.last_error
 
+    def set_error_popups_enabled(self, code, enabled: bool) -> bool:
+        """
+        Enable or disable error popups in VAST for a specific error code.
+        Corresponds to MATLAB seterrorpopupenabled(code, enabled).
+        """
+        payload = self._encode_uint32(code) + self._encode_uint32(1 if enabled else 0)
+        msg_type, data = self.send_command(SETERRORPOPUPSENABLED, payload)
+
+        if msg_type == 0:
+            self.last_error = 0
+            return True
+        else:
+            self.last_error = msg_type
+            print(f"Error setting error popup enabled: {errorCodes.get(msg_type, 'Unknown error')}")
+            return False
+        
     ############################
     #     LAYER FUNCTIONS      #
     ############################

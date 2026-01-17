@@ -1,11 +1,15 @@
 import numpy as np
 from skimage import measure
 from scipy import ndimage
-from math import floor
+from math import floor, ceil
 import re
 from typing import Tuple, List, Dict, Optional
 import time
+import logging
 from VASTControlClass import VASTControlClass
+
+# Setup logging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 
 class SurfaceExtractor:
@@ -150,46 +154,158 @@ class SurfaceExtractor:
             self.param['seg_layer_name'] = seg_layer_name
         
         print(f"Initialization complete. Extract mode: {'segmentation' if extract_seg else 'screenshots'}")
+
         
-    def _setup_screenshot_names(self, param: Dict) -> List[str]:
-        """Setup names for screenshot extraction modes"""
-        extract_which = param.get('extractwhich', 5)
+        if extract_seg:
+            # ===== COMPUTE FULL NAMES (including folder hierarchy) =====
+            if param.get('includefoldernames', 0) == 1:
+                logging.info("Computing full names with folder hierarchy...")
+                full_names = names.copy()
+
+                for i in range(len(data)):
+                    j = i
+                    # Traverse up the hierarchy (column 14 is parent ID)
+                    while data[j, 13] != 0:  # Check if parent is not 0
+                        j = int(data[j, 13])
+                        full_names[i] = names[j] + '.' + full_names[i]
+                names = full_names
+                logging.debug(f"Sample full name: {names[0] if names else 'N/A'}")
+            
+            # ===== COMPUTE LIST OF OBJECTS TO EXPORT =====
+            extract_which = param.get('extractwhich', 1)
+            logging.info(f"Computing object list (extractwhich={extract_which})...")
+            
+            if extract_which == 1:
+                # All segments individually, uncollapsed
+                objects = np.column_stack([data[:, 0], data[:, 1]]).astype(np.uint32)
+                self.vast.set_seg_translation(None, None)
+                logging.info(f"Mode 1: Exporting {len(objects)} individual segments")
+                
+            elif extract_which == 2:
+                # All segments, collapsed as in VAST
+                objects = np.unique(data[:, 17])  # Column 18 in MATLAB (0-indexed: 17)
+                objects = np.column_stack([objects, data[objects.astype(int), 1]]).astype(np.uint32)
+                self.vast.set_seg_translation(data[:, 0], data[:, 17])
+                logging.info(f"Mode 2: Exporting {len(objects)} collapsed segments")
+                
+            elif extract_which == 3:
+                # Selected segment and children, uncollapsed
+                selected = np.where((data[:, 1] & 65536) > 0)[0]
+                if len(selected) == 0:
+                    objects = np.column_stack([data[:, 0], data[:, 1]]).astype(np.uint32)
+                    logging.warning("No segments selected, exporting all")
+                else:
+                    selected = np.concatenate([selected, self._get_child_tree_ids_seg(data, selected)])
+                    objects = np.column_stack([selected, data[selected, 1]]).astype(np.uint32)
+                    logging.info(f"Mode 3: Exporting {len(objects)} selected segments + children")
+                self.vast.set_seg_translation(data[selected, 0], data[selected, 0])
+                
+            elif extract_which == 4:
+                # Selected segment and children, collapsed as in VAST
+                selected = np.where((data[:, 1] & 65536) > 0)[0]
+                if len(selected) == 0:
+                    # None selected: choose all, collapsed
+                    selected = data[:, 0].astype(int)
+                    objects = np.unique(data[:, 17])
+                    logging.warning("No segments selected, exporting all collapsed")
+                else:
+                    selected = np.concatenate([selected, self._get_child_tree_ids_seg(data, selected)])
+                    objects = np.unique(data[selected.astype(int), 17])
+                    logging.info(f"Mode 4: Exporting {len(objects)} collapsed selected segments + children")
+                
+                objects = np.column_stack([objects, data[objects.astype(int), 1]]).astype(np.uint32)
+                self.vast.set_seg_translation(data[selected.astype(int), 0], data[selected.astype(int), 17])
+            
+            else:
+                logging.error(f"Unknown extractwhich value: {extract_which}")
+                objects = np.column_stack([data[:, 0], data[:, 1]]).astype(np.uint32)
+            
+            self.objects = objects
+            param['objects'] = objects
         
-        if extract_which == 5:  # RGB 50%
-            return ['Red Layer', 'Green Layer', 'Blue Layer']
-        elif extract_which == 6:  # Brightness 50%
-            param['lev'] = 128
-            return ['Brightness 128']
-        elif extract_which == 7:  # 16 levels
-            param['lev'] = list(range(8, 257, 16))
-            return [f'B{lev:03d}' for lev in param['lev']]
-        elif extract_which == 8:  # 32 levels
-            param['lev'] = list(range(4, 257, 8))
-            return [f'B{lev:03d}' for lev in param['lev']]
-        elif extract_which == 9:  # 64 levels
-            param['lev'] = list(range(2, 257, 4))
-            return [f'B{lev:03d}' for lev in param['lev']]
+        # ===== COMPUTE NUMBER OF BLOCKS/TILES IN VOLUME =====
+        logging.info("Computing block divisions...")
+        
+        x_min, x_max = param['xmin'], param['xmax']
+        y_min, y_max = param['ymin'], param['ymax']
+        z_min, z_max = param['zmin'], param['zmax']
+        
+        block_size_x = param.get('blocksizex', 256)
+        block_size_y = param.get('blocksizey', 256)
+        block_size_z = param.get('blocksizez', 256)
+        overlap = param.get('overlap', 0)
+        slice_step = param.get('slicestep', 1)
+        
+        # Calculate X tiles
+        nr_x_tiles = 0
+        tile_x1 = x_min
+        while tile_x1 <= x_max:
+            tile_x1 += block_size_x - overlap
+            nr_x_tiles += 1
+        
+        # Calculate Y tiles
+        nr_y_tiles = 0
+        tile_y1 = y_min
+        while tile_y1 <= y_max:
+            tile_y1 += block_size_y - overlap
+            nr_y_tiles += 1
+        
+        # Calculate Z tiles
+        nr_z_tiles = 0
+        tile_z1 = z_min
+        
+        if slice_step == 1:
+            slice_numbers = list(range(z_min, z_max + 1))
+            while tile_z1 <= z_max:
+                tile_z1 += block_size_z - overlap
+                nr_z_tiles += 1
         else:
-            return []
+            slice_numbers = list(range(z_min, z_max + 1, slice_step))
+            nr_z_tiles = ceil(len(slice_numbers) / (block_size_z - overlap))
+            
+            # Compute slice numbers for each block
+            block_slice_numbers = []
+            j = 0
+            for p in range(0, len(slice_numbers), block_size_z - overlap):
+                pe = min(p + block_size_z, len(slice_numbers))
+                block_slice_numbers.append(slice_numbers[p:pe])
+                j += 1
+            param['block_slice_numbers'] = block_slice_numbers
+        
+        param['nr_x_tiles'] = nr_x_tiles
+        param['nr_y_tiles'] = nr_y_tiles
+        param['nr_z_tiles'] = nr_z_tiles
+        param['slice_numbers'] = slice_numbers
+        
+        print(f"Block division: {nr_x_tiles} x {nr_y_tiles} x {nr_z_tiles} = {nr_x_tiles * nr_y_tiles * nr_z_tiles} blocks")
+        logging.info(f"Total blocks to process: {nr_x_tiles * nr_y_tiles * nr_z_tiles}")
+        
+        # Continue to Part 3 (MIP region constraint)
+        if param.get('usemipregionconstraint', 0) == 1:
+            self._compute_mip_region_constraint(extract_seg, mip_scale_matrix)
     
-    def _check_connection(self) -> bool:
-        """Check if connection to VAST is valid"""
-        # Implement based on your GUI/connection requirements
-        return True
-    
-    def _get_selected_seg_layer_name(self) -> str:
-        """Get the name of the selected segmentation layer"""
-        # Implement via VAST API
-        return self.vast.get_selected_seg_layer_name()
-    
-    def _update_message(self, *messages):
-        """Update progress message (implement for your GUI)"""
-        print(' | '.join(messages))
-        time.sleep(0.01)
-    
-    def _show_error(self, message: str):
-        """Show error message (implement for your GUI)"""
-        print(f"ERROR: {message}")
+    def _get_child_tree_ids_seg(self, data: np.ndarray, parent_ids: np.ndarray) -> np.ndarray:
+        """
+        Recursively get all child IDs in the segment hierarchy
+        
+        Args:
+            data: Segment data matrix
+            parent_ids: Array of parent segment indices
+            
+        Returns:
+            Array of all child indices
+        """
+        children = []
+        for pid in parent_ids:
+            # Find all segments where parent (column 14/index 13) equals this segment's ID
+            child_mask = data[:, 13] == data[pid, 0]
+            child_indices = np.where(child_mask)[0]
+            if len(child_indices) > 0:
+                children.extend(child_indices)
+                # Recursively get children of children
+                children.extend(self._get_child_tree_ids_seg(data, child_indices))
+        
+        return np.array(children, dtype=int) if children else np.array([], dtype=int)
 
 
 # Example usage:

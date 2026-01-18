@@ -395,7 +395,149 @@ class SurfaceExtractor:
         print(f"Block division: {nr_x_tiles} x {nr_y_tiles} x {nr_z_tiles} = {nr_x_tiles * nr_y_tiles * nr_z_tiles} blocks")
         logging.info(f"Total blocks to process: {nr_x_tiles * nr_y_tiles * nr_z_tiles}")
 
+        if param.get('usemipregionconstraint', 0) == 1:
+            rparam = {k: param[k] for k in ['xmin', 'xmax', 'ymin', 'ymax', 'zmin', 'zmax'] if k in param}
+            logging.info("Computing MIP region constraint...")
+            print("Loading constraint mask at lower resolution...")
+            mip_region_mip = param.get('usemipregionconstraint', 0)
+
+            c_x_min = rparam['xmin'] >> mip_region_mip
+            c_x_max = (rparam['xmax'] >> mip_region_mip) - 1
+            c_y_min = rparam['ymin'] >> mip_region_mip
+            c_y_max = (rparam['ymax'] >> mip_region_mip) - 1
+            c_z_min = rparam['zmin']
+            c_z_max = rparam['zmax']
+
+            if mip_region_mip > 0 and mip_scale_matrix is not None:
+                c_z_scale = mip_scale_matrix[mip_region_mip][2]
+                c_z_min = floor(c_z_min / c_z_scale)
+                c_z_max = floor(c_z_max / c_z_scale)
+            
+            if extract_seg:
+                print(f"Loading segmentation at mip {mip_region_mip} for constraint...")
+                logging.info(f"Loading segmentation constraint: ({c_x_min}-{c_x_max}, {c_y_min}-{c_y_max}, {c_z_min}-{c_z_max})")
+                slice_step = param.get('slicestep', 1)
+            
+                if slice_step == 1:
+                    mc_seg_image, values, numbers, bboxes, res = \
+                        self.vast.get_seg_image_rle_decoded_bboxes(
+                            mip_region_mip, c_x_min, c_x_max, c_y_min, c_y_max, c_z_min, c_z_max, False
+                        )
+                else:
+                    # Load slice by slice for non-unit step
+                    slices = list(range(c_z_min, c_z_max + 1, slice_step))
+                    mc_seg_image = np.zeros((c_x_max - c_x_min + 1, c_y_max - c_y_min + 1, len(slices)))
+                    
+                    for idx, slice_num in enumerate(slices):
+                        mc_seg_slice, values, numbers, bboxes, res = \
+                            self.vast.get_seg_image_rle_decoded_bboxes(
+                                mip_region_mip, c_x_min, c_x_max, c_y_min, c_y_max, 
+                                slice_num, slice_num, 0
+                            )
+                        mc_seg_image[:, :, idx] = mc_seg_slice
+            else:
+                # Load screenshot data
+                print(f"Loading screenshots at mip {mip_region_mip} for constraint...")
+                logging.info(f"Loading screenshot constraint: ({c_x_min}-{c_x_max}, {c_y_min}-{c_y_max}, {c_z_min}-{c_z_max})")
+                
+                slice_step = param.get('slicestep', 1)
+                
+                if slice_step == 1:
+                    mc_seg_image = self.vast.get_screenshot_image(
+                        mip_region_mip, c_x_min, c_x_max, c_y_min, c_y_max, c_z_min, c_z_max, False
+                    )
+                    # Convert from (y, x, z, c) to (x, y, z) and make binary
+                    mc_seg_image = np.transpose(np.sum(mc_seg_image, axis=3) > 0, (1, 0, 2))
+                else:
+                    slices = list(range(c_z_min, c_z_max + 1, slice_step))
+                    mc_seg_image = np.zeros((c_x_max - c_x_min + 1, c_y_max - c_y_min + 1, len(slices)))
+                    
+                    for idx, slice_num in enumerate(slices):
+                        mc_seg_slice = self.vast.get_screenshot_image(
+                            mip_region_mip, c_x_min, c_x_max, c_y_min, c_y_max, 
+                            slice_num, slice_num, False
+                        )
+                        mc_seg_image[:, :, idx] = mc_seg_slice
+                    
+                    mc_seg_image = np.transpose(np.sum(mc_seg_image, axis=3) > 0, (1, 0, 2))
+
+            # Convert to binary mask (VAST pre-translates so nonzero = exported objects)
+            print("Processing constraint mask...")
+            mc_seg_image = (mc_seg_image > 0).astype(np.uint8)
+
+            # Dilate mask by region padding
+            padding = param.get('mipregionpadding', 1)
+            if padding > 0:
+                kernel_size = padding * 2 + 1
+                strel = np.ones((kernel_size, kernel_size, kernel_size), dtype=np.uint8)
+                mc_seg_image = ndimage.binary_dilation(mc_seg_image, structure=strel).astype(np.uint8)
+                logging.info(f"Dilated mask by {padding} pixels")
+            
+            # Generate 3D matrix of block loading flags
+            nr_x_tiles = param['nr_x_tiles']
+            nr_y_tiles = param['nr_y_tiles']
+            nr_z_tiles = param['nr_z_tiles']
+            mc_load_flags = np.zeros((nr_x_tiles, nr_y_tiles, nr_z_tiles), dtype=bool)
+
+            # Calculate scale factors between constraint mip and export mip
+            if mip_scale_matrix is not None:
+                c_mip_fact_x = mip_scale_matrix[mip_region_mip][0] / mip_scale_matrix[param['miplevel']][0]
+                c_mip_fact_y = mip_scale_matrix[mip_region_mip][1] / mip_scale_matrix[param['miplevel']][1]
+                c_mip_fact_z = mip_scale_matrix[mip_region_mip][2] / mip_scale_matrix[param['miplevel']][2]
+            else:
+                c_mip_fact_x = c_mip_fact_y = c_mip_fact_z = 1
+
+            # Iterate through all blocks and check if they contain data
+            x_min, y_min, z_min = param['xmin'], param['ymin'], param['zmin']
+            x_max, y_max, z_max = param['xmax'], param['ymax'], param['zmax']
+            block_size_x = param.get('blocksizex', 256)
+            block_size_y = param.get('blocksizey', 256)
+            block_size_z = param.get('blocksizez', 256)
+            overlap = param.get('overlap', 0)
+
+            print("Checking blocks for data...")
+            tile_z1 = z_min
+            for tz in range(nr_z_tiles):
+                tile_z2 = min(tile_z1 + block_size_z - 1, z_max)
+                tile_y1 = y_min
+                
+                for ty in range(nr_y_tiles):
+                    tile_y2 = min(tile_y1 + block_size_y - 1, y_max)
+                    tile_x1 = x_min
+                    
+                    for tx in range(nr_x_tiles):
+                        tile_x2 = min(tile_x1 + block_size_x - 1, x_max)
+                        
+                        # Compute tile coords on constraint mip
+                        c_min_x = max(0, int(floor((tile_x1 - x_min) / c_mip_fact_x)))
+                        c_max_x = min(mc_seg_image.shape[0] - 1, int(ceil((tile_x2 - x_min) / c_mip_fact_x)))
+                        c_min_y = max(0, int(floor((tile_y1 - y_min) / c_mip_fact_y)))
+                        c_max_y = min(mc_seg_image.shape[1] - 1, int(ceil((tile_y2 - y_min) / c_mip_fact_y)))
+                        c_min_z = max(0, int(floor((tile_z1 - z_min) / c_mip_fact_z)))
+                        c_max_z = min(mc_seg_image.shape[2] - 1, int(ceil((tile_z2 - z_min) / c_mip_fact_z)))
+                        
+                        # Crop region from constraint mip
+                        crop_region = mc_seg_image[c_min_x:c_max_x+1, c_min_y:c_max_y+1, c_min_z:c_max_z+1]
+                        
+                        # Flag will be True if any voxels in crop region are nonzero
+                        mc_load_flags[tx, ty, tz] = np.max(crop_region) > 0
+                        
+                        tile_x1 += block_size_x - overlap
+                    tile_y1 += block_size_y - overlap
+                tile_z1 += block_size_z - overlap
+
+            blocks_to_process = np.sum(mc_load_flags)
+            blocks_to_skip = mc_load_flags.size - blocks_to_process
+            print(f"Constraint check complete: {blocks_to_process} blocks to process, {blocks_to_skip} blocks to skip")
+            logging.info(f"MIP constraint reduces workload by {100 * blocks_to_skip / mc_load_flags.size:.1f}%")
+            
+            param['mc_load_flags'] = mc_load_flags
+
         
+
+
+
+
 """            
 
         

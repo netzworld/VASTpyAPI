@@ -154,14 +154,68 @@ class SurfaceExtractor:
             self.param['seg_layer_name'] = seg_layer_name
         
         print(f"Initialization complete. Extract mode: {'segmentation' if extract_seg else 'screenshots'}")
-
+        
+        # Continue to Part 2
+        self._process_objects_and_blocks(extract_seg, data, names, mip_scale_matrix)
+        
+    def _setup_screenshot_names(self, param: Dict) -> List[str]:
+        """Setup names for screenshot extraction modes"""
+        extract_which = param.get('extractwhich', 5)
+        
+        if extract_which == 5:  # RGB 50%
+            return ['Red Layer', 'Green Layer', 'Blue Layer']
+        elif extract_which == 6:  # Brightness 50%
+            param['lev'] = 128
+            return ['Brightness 128']
+        elif extract_which == 7:  # 16 levels
+            param['lev'] = list(range(8, 257, 16))
+            return [f'B{lev:03d}' for lev in param['lev']]
+        elif extract_which == 8:  # 32 levels
+            param['lev'] = list(range(4, 257, 8))
+            return [f'B{lev:03d}' for lev in param['lev']]
+        elif extract_which == 9:  # 64 levels
+            param['lev'] = list(range(2, 257, 4))
+            return [f'B{lev:03d}' for lev in param['lev']]
+        else:
+            return []
+    
+    def _check_connection(self) -> bool:
+        """Check if connection to VAST is valid"""
+        # Implement based on your GUI/connection requirements
+        return True
+    
+    def _get_selected_seg_layer_name(self) -> str:
+        """Get the name of the selected segmentation layer"""
+        # Implement via VAST API
+        return self.vast.get_selected_seg_layer_name()
+    
+    def _update_message(self, *messages):
+        """Update progress message (implement for your GUI)"""
+        print(' | '.join(messages))
+        time.sleep(0.01)
+    
+    def _show_error(self, message: str):
+        """Show error message (implement for your GUI)"""
+        print(f"ERROR: {message}")
+    
+    def _process_objects_and_blocks(self, extract_seg: bool, data: np.ndarray, 
+                                     names: List[str], mip_scale_matrix: Optional[np.ndarray]):
+        """
+        Part 2: Process object selection, compute folder names, and calculate block divisions
+        
+        Args:
+            extract_seg: True if extracting segmentation, False for screenshots
+            data: Segment data matrix (for segmentation mode)
+            names: List of object/segment names
+            mip_scale_matrix: Mipmap scaling factors
+        """
+        param = self.param
         
         if extract_seg:
             # ===== COMPUTE FULL NAMES (including folder hierarchy) =====
             if param.get('includefoldernames', 0) == 1:
                 logging.info("Computing full names with folder hierarchy...")
                 full_names = names.copy()
-
                 for i in range(len(data)):
                     j = i
                     # Traverse up the hierarchy (column 14 is parent ID)
@@ -306,6 +360,222 @@ class SurfaceExtractor:
                 children.extend(self._get_child_tree_ids_seg(data, child_indices))
         
         return np.array(children, dtype=int) if children else np.array([], dtype=int)
+    
+    def _compute_mip_region_constraint(self, extract_seg: bool, mip_scale_matrix: Optional[np.ndarray]):
+        """
+        Part 3: Compute MIP region constraint to skip empty blocks
+        
+        This loads a lower-resolution version of the data, creates a binary mask,
+        dilates it by padding, and marks which blocks contain data.
+        
+        Args:
+            extract_seg: True if extracting segmentation, False for screenshots
+            mip_scale_matrix: Mipmap scaling factors
+        """
+        param = self.param
+        rparam = {k: param[k] for k in ['xmin', 'xmax', 'ymin', 'ymax', 'zmin', 'zmax'] if k in param}
+        
+        logging.info("Computing MIP region constraint...")
+        print("Loading constraint mask at lower resolution...")
+        
+        # Calculate export region at constraint mip level
+        mip_region_mip = param.get('mipregionmip', 0)
+        
+        c_x_min = rparam['xmin'] >> mip_region_mip
+        c_x_max = (rparam['xmax'] >> mip_region_mip) - 1
+        c_y_min = rparam['ymin'] >> mip_region_mip
+        c_y_max = (rparam['ymax'] >> mip_region_mip) - 1
+        c_z_min = rparam['zmin']
+        c_z_max = rparam['zmax']
+        
+        if mip_region_mip > 0 and mip_scale_matrix is not None:
+            c_z_scale = mip_scale_matrix[mip_region_mip][2]
+            c_z_min = floor(c_z_min / c_z_scale)
+            c_z_max = floor(c_z_max / c_z_scale)
+        
+        # Load complete region at constraint mip level
+        if extract_seg:
+            # Load segmentation data
+            print(f"Loading segmentation at mip {mip_region_mip} for constraint...")
+            logging.info(f"Loading segmentation constraint: ({c_x_min}-{c_x_max}, {c_y_min}-{c_y_max}, {c_z_min}-{c_z_max})")
+            
+            slice_step = param.get('slicestep', 1)
+            
+            if slice_step == 1:
+                mc_seg_image, values, numbers, bboxes, res = \
+                    self.vast.get_seg_image_rle_decoded_bboxes(
+                        mip_region_mip, c_x_min, c_x_max, c_y_min, c_y_max, c_z_min, c_z_max, 0
+                    )
+            else:
+                # Load slice by slice for non-unit step
+                slices = list(range(c_z_min, c_z_max + 1, slice_step))
+                mc_seg_image = np.zeros((c_x_max - c_x_min + 1, c_y_max - c_y_min + 1, len(slices)))
+                
+                for idx, slice_num in enumerate(slices):
+                    mc_seg_slice, values, numbers, bboxes, res = \
+                        self.vast.get_seg_image_rle_decoded_bboxes(
+                            mip_region_mip, c_x_min, c_x_max, c_y_min, c_y_max, 
+                            slice_num, slice_num, 0
+                        )
+                    mc_seg_image[:, :, idx] = mc_seg_slice
+        else:
+            # Load screenshot data
+            print(f"Loading screenshots at mip {mip_region_mip} for constraint...")
+            logging.info(f"Loading screenshot constraint: ({c_x_min}-{c_x_max}, {c_y_min}-{c_y_max}, {c_z_min}-{c_z_max})")
+            
+            slice_step = param.get('slicestep', 1)
+            
+            if slice_step == 1:
+                mc_seg_image, res = self.vast.get_screenshot_image(
+                    mip_region_mip, c_x_min, c_x_max, c_y_min, c_y_max, c_z_min, c_z_max, 0
+                )
+                # Convert from (y, x, z, c) to (x, y, z) and make binary
+                mc_seg_image = np.transpose(np.sum(mc_seg_image, axis=3) > 0, (1, 0, 2))
+            else:
+                slices = list(range(c_z_min, c_z_max + 1, slice_step))
+                mc_seg_image = np.zeros((c_x_max - c_x_min + 1, c_y_max - c_y_min + 1, len(slices)))
+                
+                for idx, slice_num in enumerate(slices):
+                    mc_seg_slice, res = self.vast.get_screenshot_image(
+                        mip_region_mip, c_x_min, c_x_max, c_y_min, c_y_max, 
+                        slice_num, slice_num, 0
+                    )
+                    mc_seg_image[:, :, idx] = mc_seg_slice
+                
+                mc_seg_image = np.transpose(np.sum(mc_seg_image, axis=3) > 0, (1, 0, 2))
+        
+        # Convert to binary mask (VAST pre-translates so nonzero = exported objects)
+        print("Processing constraint mask...")
+        mc_seg_image = (mc_seg_image > 0).astype(np.uint8)
+        
+        # Dilate mask by region padding
+        padding = param.get('mipregionpadding', 1)
+        if padding > 0:
+            kernel_size = padding * 2 + 1
+            strel = np.ones((kernel_size, kernel_size, kernel_size), dtype=np.uint8)
+            mc_seg_image = ndimage.binary_dilation(mc_seg_image, structure=strel).astype(np.uint8)
+            logging.info(f"Dilated mask by {padding} pixels")
+        
+        # Generate 3D matrix of block loading flags
+        nr_x_tiles = param['nr_x_tiles']
+        nr_y_tiles = param['nr_y_tiles']
+        nr_z_tiles = param['nr_z_tiles']
+        mc_load_flags = np.zeros((nr_x_tiles, nr_y_tiles, nr_z_tiles), dtype=bool)
+        
+        # Calculate scale factors between constraint mip and export mip
+        if mip_scale_matrix is not None:
+            c_mip_fact_x = mip_scale_matrix[mip_region_mip][0] / mip_scale_matrix[param['miplevel']][0]
+            c_mip_fact_y = mip_scale_matrix[mip_region_mip][1] / mip_scale_matrix[param['miplevel']][1]
+            c_mip_fact_z = mip_scale_matrix[mip_region_mip][2] / mip_scale_matrix[param['miplevel']][2]
+        else:
+            c_mip_fact_x = c_mip_fact_y = c_mip_fact_z = 1
+        
+        # Iterate through all blocks and check if they contain data
+        x_min, y_min, z_min = param['xmin'], param['ymin'], param['zmin']
+        x_max, y_max, z_max = param['xmax'], param['ymax'], param['zmax']
+        block_size_x = param.get('blocksizex', 256)
+        block_size_y = param.get('blocksizey', 256)
+        block_size_z = param.get('blocksizez', 256)
+        overlap = param.get('overlap', 0)
+        
+        print("Checking blocks for data...")
+        tile_z1 = z_min
+        for tz in range(nr_z_tiles):
+            tile_z2 = min(tile_z1 + block_size_z - 1, z_max)
+            tile_y1 = y_min
+            
+            for ty in range(nr_y_tiles):
+                tile_y2 = min(tile_y1 + block_size_y - 1, y_max)
+                tile_x1 = x_min
+                
+                for tx in range(nr_x_tiles):
+                    tile_x2 = min(tile_x1 + block_size_x - 1, x_max)
+                    
+                    # Compute tile coords on constraint mip
+                    c_min_x = max(0, int(floor((tile_x1 - x_min) / c_mip_fact_x)))
+                    c_max_x = min(mc_seg_image.shape[0] - 1, int(ceil((tile_x2 - x_min) / c_mip_fact_x)))
+                    c_min_y = max(0, int(floor((tile_y1 - y_min) / c_mip_fact_y)))
+                    c_max_y = min(mc_seg_image.shape[1] - 1, int(ceil((tile_y2 - y_min) / c_mip_fact_y)))
+                    c_min_z = max(0, int(floor((tile_z1 - z_min) / c_mip_fact_z)))
+                    c_max_z = min(mc_seg_image.shape[2] - 1, int(ceil((tile_z2 - z_min) / c_mip_fact_z)))
+                    
+                    # Crop region from constraint mip
+                    crop_region = mc_seg_image[c_min_x:c_max_x+1, c_min_y:c_max_y+1, c_min_z:c_max_z+1]
+                    
+                    # Flag will be True if any voxels in crop region are nonzero
+                    mc_load_flags[tx, ty, tz] = np.max(crop_region) > 0
+                    
+                    tile_x1 += block_size_x - overlap
+                tile_y1 += block_size_y - overlap
+            tile_z1 += block_size_z - overlap
+        
+        blocks_to_process = np.sum(mc_load_flags)
+        blocks_to_skip = mc_load_flags.size - blocks_to_process
+        print(f"Constraint check complete: {blocks_to_process} blocks to process, {blocks_to_skip} blocks to skip")
+        logging.info(f"MIP constraint reduces workload by {100 * blocks_to_skip / mc_load_flags.size:.1f}%")
+        
+        param['mc_load_flags'] = mc_load_flags
+    
+    def _initialize_storage_arrays(self, extract_seg: bool):
+        """
+        Part 4: Initialize storage arrays for faces and vertices
+        
+        Creates cell/dict structures to store mesh data for each object in each block.
+        For mode 10 (unique colors), uses sparse indexing.
+        
+        Args:
+            extract_seg: True if extracting segmentation, False for screenshots
+        """
+        param = self.param
+        
+        logging.info("Initializing storage arrays...")
+        
+        nr_x_tiles = param['nr_x_tiles']
+        nr_y_tiles = param['nr_y_tiles']
+        nr_z_tiles = param['nr_z_tiles']
+        
+        if extract_seg:
+            # Storage for segmentation objects
+            max_obj_num = param['max_object_number']
+            
+            # Initialize as nested dictionaries: farray[obj][tx][ty][tz] = faces
+            # Using dict for sparse storage (most cells will be empty)
+            param['farray'] = {}
+            param['varray'] = {}
+            param['object_volume'] = np.zeros(len(param['objects']), dtype=np.int64)
+            
+            print(f"Initialized storage for {max_obj_num} potential objects across {nr_x_tiles}x{nr_y_tiles}x{nr_z_tiles} blocks")
+            logging.info(f"Storage size: {len(param['objects'])} objects x {nr_x_tiles * nr_y_tiles * nr_z_tiles} blocks")
+            
+        else:
+            # Storage for screenshot-based extraction
+            extract_which = param.get('extractwhich', 5)
+            
+            if extract_which == 10:
+                # Up to 2^24 unique color objects
+                # Use sparse matrix for indexing: fvindex[color, block_idx] = block_number
+                total_colors = 256 * 256 * 256
+                total_blocks = (nr_x_tiles + 1) * (nr_y_tiles + 1) * (nr_z_tiles + 1)
+                
+                # Sparse matrix would be huge, use dict instead
+                param['fvindex'] = {}  # Will map (color, block_idx) -> block_number
+                param['farray'] = {}   # Will map block_number -> faces
+                param['varray'] = {}   # Will map block_number -> vertices
+                param['object_volume'] = np.zeros(total_colors, dtype=np.int64)
+                
+                print(f"Initialized storage for unique color extraction (up to {total_colors} colors)")
+                logging.info("Using sparse storage for color-based extraction")
+                
+            else:
+                # RGB layers or brightness levels (small number of objects)
+                num_objects = len(param['objects'])
+                
+                param['farray'] = {}
+                param['varray'] = {}
+                param['object_volume'] = np.zeros(num_objects, dtype=np.int64)
+                
+                print(f"Initialized storage for {num_objects} screenshot-based objects")
+                logging.info(f"Storage for {num_objects} objects x {nr_x_tiles * nr_y_tiles * nr_z_tiles} blocks")
 
 
 # Example usage:

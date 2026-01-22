@@ -337,6 +337,9 @@ class SurfaceExtractor:
         # Continue to Part 3 (MIP region constraint)
         if param.get('usemipregionconstraint', 0) == 1:
             self._compute_mip_region_constraint(extract_seg, mip_scale_matrix)
+        
+        # Continue to Part 4 (Initialize storage arrays)
+        self._initialize_storage_arrays(extract_seg)
     
     def _get_child_tree_ids_seg(self, data: np.ndarray, parent_ids: np.ndarray) -> np.ndarray:
         """
@@ -576,6 +579,690 @@ class SurfaceExtractor:
                 
                 print(f"Initialized storage for {num_objects} screenshot-based objects")
                 logging.info(f"Storage for {num_objects} objects x {nr_x_tiles * nr_y_tiles * nr_z_tiles} blocks")
+    
+    def _extract_block_surfaces(self, extract_seg: bool, mip_scale_matrix: Optional[np.ndarray]):
+        """
+        Part 5: Main extraction loop - process each block and extract isosurfaces
+        
+        Iterates through all blocks in the volume, loads data, and extracts surfaces
+        using marching cubes algorithm.
+        
+        Args:
+            extract_seg: True if extracting segmentation, False for screenshots
+            mip_scale_matrix: Mipmap scaling factors
+        """
+        param = self.param
+        data = self.data if extract_seg else None
+        
+        x_min, y_min, z_min = param['xmin'], param['ymin'], param['zmin']
+        x_max, y_max, z_max = param['xmax'], param['ymax'], param['zmax']
+        nr_x_tiles = param['nr_x_tiles']
+        nr_y_tiles = param['nr_y_tiles']
+        nr_z_tiles = param['nr_z_tiles']
+        block_size_x = param.get('blocksizex', 256)
+        block_size_y = param.get('blocksizey', 256)
+        block_size_z = param.get('blocksizez', 256)
+        overlap = param.get('overlap', 0)
+        
+        mc_load_flags = param.get('mc_load_flags', None)
+        use_constraint = mc_load_flags is not None
+        
+        print("=" * 60)
+        print("Starting surface extraction...")
+        print("=" * 60)
+        
+        block_nr = 0  # For mode 10 color tracking
+        total_blocks = nr_x_tiles * nr_y_tiles * nr_z_tiles
+        processed_blocks = 0
+        skipped_blocks = 0
+        
+        # Main triple loop through blocks
+        tile_z1 = z_min
+        for tz in range(nr_z_tiles):
+            if self.canceled:
+                break
+                
+            tile_z2 = min(tile_z1 + block_size_z - 1, z_max)
+            tile_zs = tile_z2 - tile_z1 + 1
+            
+            tile_y1 = y_min
+            for ty in range(nr_y_tiles):
+                if self.canceled:
+                    break
+                    
+                tile_y2 = min(tile_y1 + block_size_y - 1, y_max)
+                tile_ys = tile_y2 - tile_y1 + 1
+                
+                tile_x1 = x_min
+                for tx in range(nr_x_tiles):
+                    if self.canceled:
+                        break
+                        
+                    tile_x2 = min(tile_x1 + block_size_x - 1, x_max)
+                    tile_xs = tile_x2 - tile_x1 + 1
+                    
+                    # Check if we should skip this block
+                    if use_constraint and not mc_load_flags[tx, ty, tz]:
+                        skipped_blocks += 1
+                        tile_x1 += block_size_x - overlap
+                        continue
+                    
+                    # Process this block
+                    processed_blocks += 1
+                    if processed_blocks % 10 == 0 or processed_blocks == 1:
+                        progress = 100 * processed_blocks / (total_blocks - skipped_blocks)
+                        print(f"Processing block ({tx+1},{ty+1},{tz+1}) of ({nr_x_tiles},{nr_y_tiles},{nr_z_tiles}) - {progress:.1f}% complete")
+                    
+                    if extract_seg:
+                        self._process_segmentation_block(
+                            tx, ty, tz, tile_x1, tile_x2, tile_y1, tile_y2, tile_z1, tile_z2,
+                            tile_xs, tile_ys, tile_zs, data, mip_scale_matrix
+                        )
+                    else:
+                        self._process_screenshot_block(
+                            tx, ty, tz, tile_x1, tile_x2, tile_y1, tile_y2, tile_z1, tile_z2,
+                            tile_xs, tile_ys, tile_zs, mip_scale_matrix, block_nr
+                        )
+                        block_nr += 1
+                    
+                    tile_x1 += block_size_x - overlap
+                tile_y1 += block_size_y - overlap
+            tile_z1 += block_size_z - overlap
+        
+        if extract_seg:
+            # Clear segment translation
+            self.vast.set_seg_translation(None, None)
+        
+        print("=" * 60)
+        if self.canceled:
+            print("Extraction CANCELED")
+        else:
+            print(f"Extraction complete! Processed {processed_blocks} blocks, skipped {skipped_blocks}")
+        print("=" * 60)
+        
+        logging.info(f"Block processing complete: {processed_blocks} processed, {skipped_blocks} skipped")
+
+    def _process_segmentation_block(self, tx: int, ty: int, tz: int,
+                                     tile_x1: int, tile_x2: int, 
+                                     tile_y1: int, tile_y2: int,
+                                     tile_z1: int, tile_z2: int,
+                                     tile_xs: int, tile_ys: int, tile_zs: int,
+                                     data: np.ndarray, mip_scale_matrix: Optional[np.ndarray]):
+        """
+        Part 5a: Process a single segmentation block
+        
+        Loads segmentation data for this block, optionally applies erosion/dilation,
+        adds boundary slices for surface closing, then extracts surfaces for each object.
+        
+        Args:
+            tx, ty, tz: Block indices
+            tile_x1, tile_x2, tile_y1, tile_y2, tile_z1, tile_z2: Block boundaries
+            tile_xs, tile_ys, tile_zs: Block sizes
+            data: Segment data matrix
+            mip_scale_matrix: Mipmap scaling factors
+        """
+        param = self.param
+        
+        logging.debug(f"Loading segmentation block ({tx},{ty},{tz})...")
+        
+        # Determine erosion/dilation padding
+        mip_data_size = param.get('mip_data_size', None)
+        if param.get('erodedilate', 0) == 1 and mip_data_size is not None:
+            edx = np.ones((3, 2), dtype=int)
+            if tile_x1 == 0:
+                edx[0, 0] = 0
+            if tile_x2 >= mip_data_size[0]:
+                edx[0, 1] = 0
+            if tile_y1 == 0:
+                edx[1, 0] = 0
+            if tile_y2 >= mip_data_size[1]:
+                edx[1, 1] = 0
+            if tile_z1 == 0:
+                edx[2, 0] = 0
+            if tile_z2 >= mip_data_size[2]:
+                edx[2, 1] = 0
+        else:
+            edx = np.zeros((3, 2), dtype=int)
+        
+        # Load segmentation data
+        slice_step = param.get('slicestep', 1)
+        max_object_number = param.get('max_object_number', 0)
+        
+        if slice_step == 1:
+            seg_image, values, numbers, bboxes, res = \
+                self.vast.get_seg_image_rle_decoded_bboxes(
+                    param['miplevel'],
+                    tile_x1 - edx[0, 0], tile_x2 + edx[0, 1],
+                    tile_y1 - edx[1, 0], tile_y2 + edx[1, 1],
+                    tile_z1 - edx[2, 0], tile_z2 + edx[2, 1],
+                    0
+                )
+        else:
+            # Load slice-by-slice for non-unit step
+            block_slice_numbers = param.get('block_slice_numbers', [[]])[tz]
+            bs = block_slice_numbers.copy()
+            
+            # Add padding slices if needed for erosion/dilation
+            if edx[2, 0] == 1:
+                bs = [bs[0] - slice_step] + bs
+            if edx[2, 1] == 1:
+                bs = bs + [bs[-1] + slice_step]
+            
+            seg_image = np.zeros((tile_x2 - tile_x1 + 1 + edx[0, 0] + edx[0, 1],
+                                 tile_y2 - tile_y1 + 1 + edx[1, 0] + edx[1, 1],
+                                 len(bs)), dtype=np.uint16)
+            
+            num_arr = np.zeros(max_object_number, dtype=np.int32)
+            bbox_arr = np.full((max_object_number, 6), -1, dtype=float)
+            first_block_slice = bs[0]
+            
+            for i, slice_num in enumerate(bs):
+                s_seg_image, s_values, s_numbers, s_bboxes, res = \
+                    self.vast.get_seg_image_rle_decoded_bboxes(
+                        param['miplevel'],
+                        tile_x1 - edx[0, 0], tile_x2 + edx[0, 1],
+                        tile_y1 - edx[1, 0], tile_y2 + edx[1, 1],
+                        slice_num, slice_num, 0
+                    )
+                seg_image[:, :, i] = s_seg_image
+                
+                # Remove zero values
+                if s_values is not None and len(s_values) > 0:
+                    mask = s_values != 0
+                    s_values = s_values[mask]
+                    s_numbers = s_numbers[mask]
+                    s_bboxes = s_bboxes[mask]
+                    
+                    # Adjust bboxes for z
+                    s_bboxes[:, [2, 5]] = s_bboxes[:, [2, 5]] + i
+                    
+                    if len(s_values) > 0:
+                        num_arr[s_values] += s_numbers
+                        bbox_arr[s_values] = self._expand_bounding_boxes(bbox_arr[s_values], s_bboxes)
+            
+            values = np.where(num_arr > 0)[0]
+            numbers = num_arr[values]
+            bboxes = bbox_arr[values]
+        
+        # Apply erosion/dilation if requested
+        if param.get('erodedilate', 0) == 1:
+            strel = np.ones((2, 2, 2), dtype=np.uint8)
+            # Opening = erosion followed by dilation (removes 1-voxel thin objects)
+            seg_image = ndimage.binary_opening(seg_image, structure=strel).astype(np.uint16)
+            
+            # Crop padding
+            seg_image = seg_image[
+                edx[0, 0]:(seg_image.shape[0] - edx[0, 1]) if edx[0, 1] > 0 else seg_image.shape[0],
+                edx[1, 0]:(seg_image.shape[1] - edx[1, 1]) if edx[1, 1] > 0 else seg_image.shape[1],
+                edx[2, 0]:(seg_image.shape[2] - edx[2, 1]) if edx[2, 1] > 0 else seg_image.shape[2]
+            ]
+            
+            # Adjust bboxes
+            if bboxes is not None and len(bboxes) > 0:
+                if edx[0, 0] > 0:
+                    bb = bboxes[:, [0, 3]] - 1
+                    bb[bb == 0] = 1
+                    bboxes[:, [0, 3]] = bb
+                if edx[0, 1] > 0:
+                    bb = bboxes[:, [0, 3]]
+                    bb[bb > seg_image.shape[0]] = seg_image.shape[0]
+                    bboxes[:, [0, 3]] = bb
+                
+                if edx[1, 0] > 0:
+                    bb = bboxes[:, [1, 4]] - 1
+                    bb[bb == 0] = 1
+                    bboxes[:, [1, 4]] = bb
+                if edx[1, 1] > 0:
+                    bb = bboxes[:, [1, 4]]
+                    bb[bb > seg_image.shape[1]] = seg_image.shape[1]
+                    bboxes[:, [1, 4]] = bb
+                
+                if edx[2, 0] > 0:
+                    bb = bboxes[:, [2, 5]] - 1
+                    bb[bb == 0] = 1
+                    bboxes[:, [2, 5]] = bb
+                if edx[2, 1] > 0:
+                    bb = bboxes[:, [2, 5]]
+                    bb[bb > seg_image.shape[2]] = seg_image.shape[2]
+                    bboxes[:, [2, 5]] = bb
+        
+        # Process segmentation data
+        logging.debug(f"Processing {len(values)} objects in block ({tx},{ty},{tz})...")
+        
+        # Remove zero values from consideration
+        if values is not None and len(values) > 0:
+            mask = values != 0
+            values = values[mask]
+            numbers = numbers[mask]
+            bboxes = bboxes[mask]
+        
+        if values is None or len(values) == 0:
+            logging.debug(f"No objects in block ({tx},{ty},{tz})")
+            return
+        
+        # Adjust for surface closing (add boundary slices)
+        x_vofs = y_vofs = z_vofs = 0
+        tt_xs, tt_ys, tt_zs = tile_xs, tile_ys, tile_zs
+        
+        if param.get('closesurfaces', 0) == 1:
+            if tx == 0:
+                seg_image = np.concatenate([np.zeros((1, seg_image.shape[1], seg_image.shape[2]), dtype=seg_image.dtype), 
+                                           seg_image], axis=0)
+                bboxes[:, 0] += 1
+                bboxes[:, 3] += 1
+                x_vofs -= 1
+                tt_xs += 1
+            if ty == 0:
+                seg_image = np.concatenate([np.zeros((seg_image.shape[0], 1, seg_image.shape[2]), dtype=seg_image.dtype), 
+                                           seg_image], axis=1)
+                bboxes[:, 1] += 1
+                bboxes[:, 4] += 1
+                y_vofs -= 1
+                tt_ys += 1
+            if tz == 0:
+                seg_image = np.concatenate([np.zeros((seg_image.shape[0], seg_image.shape[1], 1), dtype=seg_image.dtype), 
+                                           seg_image], axis=2)
+                bboxes[:, 2] += 1
+                bboxes[:, 5] += 1
+                z_vofs -= 1
+                tt_zs += 1
+            if tx == param['nr_x_tiles'] - 1:
+                seg_image = np.concatenate([seg_image,
+                                           np.zeros((1, seg_image.shape[1], seg_image.shape[2]), dtype=seg_image.dtype)], axis=0)
+                tt_xs += 1
+            if ty == param['nr_y_tiles'] - 1:
+                seg_image = np.concatenate([seg_image,
+                                           np.zeros((seg_image.shape[0], 1, seg_image.shape[2]), dtype=seg_image.dtype)], axis=1)
+                tt_ys += 1
+            if tz == param['nr_z_tiles'] - 1:
+                seg_image = np.concatenate([seg_image,
+                                           np.zeros((seg_image.shape[0], seg_image.shape[1], 1), dtype=seg_image.dtype)], axis=2)
+                tt_zs += 1
+        
+        # Extract surfaces for each segment
+        first_block_slice = param.get('block_slice_numbers', [[tile_z1]])[tz][0] if slice_step > 1 else tile_z1
+        
+        for seg_nr, seg in enumerate(values):
+            if self.canceled:
+                break
+            
+            # Get bounding box and expand by 1 voxel
+            bbx = bboxes[seg_nr].copy()
+            bbx += np.array([-1, -1, -1, 1, 1, 1])
+            bbx[0] = max(1, bbx[0])
+            bbx[1] = max(1, bbx[1])
+            bbx[2] = max(1, bbx[2])
+            bbx[3] = min(tt_xs, bbx[3])
+            bbx[4] = min(tt_ys, bbx[4])
+            bbx[5] = min(tt_zs, bbx[5])
+            
+            # Ensure at least 2 pixels in each direction
+            if bbx[0] == bbx[3]:
+                if bbx[0] > 1:
+                    bbx[0] -= 1
+                else:
+                    bbx[3] += 1
+            if bbx[1] == bbx[4]:
+                if bbx[1] > 1:
+                    bbx[1] -= 1
+                else:
+                    bbx[4] += 1
+            if bbx[2] == bbx[5]:
+                if bbx[2] > 1:
+                    bbx[2] -= 1
+                else:
+                    bbx[5] += 1
+            
+            # Extract subsegment (convert to 0-indexed)
+            bbx_int = bbx.astype(int) - 1  # MATLAB is 1-indexed
+            subseg = seg_image[bbx_int[0]:bbx_int[3]+1, bbx_int[1]:bbx_int[4]+1, bbx_int[2]:bbx_int[5]+1]
+            subseg = (subseg == seg).astype(float)
+            
+            # Extract isosurface using marching cubes
+            try:
+                verts, faces, normals, values_mc = measure.marching_cubes(subseg, level=0.5)
+                
+                if len(verts) > 0:
+                    # Adjust coordinates for bounding box offset
+                    verts[:, 0] += bbx_int[1] + y_vofs  # Y in MATLAB order
+                    verts[:, 1] += bbx_int[0] + x_vofs  # X in MATLAB order
+                    verts[:, 2] += bbx_int[2] + z_vofs  # Z
+                    
+                    # Adjust for tile position
+                    verts[:, 0] += tile_y1
+                    verts[:, 1] += tile_x1
+                    
+                    if slice_step == 1:
+                        verts[:, 2] += tile_z1
+                    else:
+                        verts[:, 2] = ((verts[:, 2] - 0.5) * slice_step) + 0.5 + first_block_slice
+                    
+                    # Scale to physical units
+                    verts[:, 0] *= param.get('yscale', 1.0) * param.get('yunit', 1.0) * param['mipfacty']
+                    verts[:, 1] *= param.get('xscale', 1.0) * param.get('xunit', 1.0) * param['mipfactx']
+                    verts[:, 2] *= param.get('zscale', 1.0) * param.get('zunit', 1.0) * param['mipfactz']
+                    
+                    # Store faces and vertices (convert faces to 1-indexed for OBJ format later)
+                    param['farray'][(int(seg), tx, ty, tz)] = faces
+                    param['varray'][(int(seg), tx, ty, tz)] = verts
+                    
+            except Exception as e:
+                logging.warning(f"Failed to extract surface for segment {seg} in block ({tx},{ty},{tz}): {e}")
+    
+    def _expand_bounding_boxes(self, bbox1: np.ndarray, bbox2: np.ndarray) -> np.ndarray:
+        """
+        Expand bounding boxes to encompass both input boxes
+        
+        Args:
+            bbox1: First bounding box array (N x 6)
+            bbox2: Second bounding box array (N x 6)
+            
+        Returns:
+            Expanded bounding boxes
+        """
+        if bbox1.ndim == 1:
+            bbox1 = bbox1.reshape(1, -1)
+        if bbox2.ndim == 1:
+            bbox2 = bbox2.reshape(1, -1)
+        
+        result = bbox1.copy()
+        
+        # For uninitialized boxes (-1), use bbox2
+        uninit_mask = bbox1[:, 0] == -1
+        result[uninit_mask] = bbox2[uninit_mask]
+        
+        # For initialized boxes, take min/max
+        init_mask = ~uninit_mask
+        if np.any(init_mask):
+            result[init_mask, 0] = np.minimum(bbox1[init_mask, 0], bbox2[init_mask, 0])
+            result[init_mask, 1] = np.minimum(bbox1[init_mask, 1], bbox2[init_mask, 1])
+            result[init_mask, 2] = np.minimum(bbox1[init_mask, 2], bbox2[init_mask, 2])
+            result[init_mask, 3] = np.maximum(bbox1[init_mask, 3], bbox2[init_mask, 3])
+            result[init_mask, 4] = np.maximum(bbox1[init_mask, 4], bbox2[init_mask, 4])
+            result[init_mask, 5] = np.maximum(bbox1[init_mask, 5], bbox2[init_mask, 5])
+        
+        return result
+
+    def _process_screenshot_block(self, tx: int, ty: int, tz: int,
+                                   tile_x1: int, tile_x2: int,
+                                   tile_y1: int, tile_y2: int,
+                                   tile_z1: int, tile_z2: int,
+                                   tile_xs: int, tile_ys: int, tile_zs: int,
+                                   mip_scale_matrix: Optional[np.ndarray],
+                                   block_nr: int):
+        """
+        Part 5b: Process a single screenshot block
+        
+        Loads screenshot/image data for this block, extracts RGB layers or brightness levels,
+        and generates surfaces for each layer/level or unique color.
+        
+        Args:
+            tx, ty, tz: Block indices
+            tile_x1, tile_x2, tile_y1, tile_y2, tile_z1, tile_z2: Block boundaries
+            tile_xs, tile_ys, tile_zs: Block sizes
+            mip_scale_matrix: Mipmap scaling factors
+            block_nr: Block number (for mode 10 color tracking)
+        """
+        param = self.param
+        
+        logging.debug(f"Loading screenshot block ({tx},{ty},{tz})...")
+        
+        # Load screenshot data
+        slice_step = param.get('slicestep', 1)
+        
+        if slice_step == 1:
+            scs_image, res = self.vast.get_screenshot_image(
+                param['miplevel'],
+                tile_x1, tile_x2, tile_y1, tile_y2, tile_z1, tile_z2, 1, 1
+            )
+            
+            # Handle single slice case (returns 3D instead of 4D)
+            if tile_z1 == tile_z2 and scs_image.ndim == 3:
+                scs_image = scs_image.reshape(scs_image.shape[0], scs_image.shape[1], 1, scs_image.shape[2])
+        else:
+            # Load slice-by-slice
+            block_slice_numbers = param.get('block_slice_numbers', [[]])[tz]
+            bs = block_slice_numbers
+            
+            scs_image = np.zeros((tile_y2 - tile_y1 + 1, tile_x2 - tile_x1 + 1, len(bs), 3), dtype=np.uint8)
+            first_block_slice = bs[0]
+            
+            for i, slice_num in enumerate(bs):
+                scs_slice, res = self.vast.get_screenshot_image(
+                    param['miplevel'],
+                    tile_x1, tile_x2, tile_y1, tile_y2,
+                    slice_num, slice_num, 1, 1
+                )
+                scs_image[:, :, i, :] = scs_slice
+        
+        logging.debug(f"Processing screenshot block ({tx},{ty},{tz})...")
+        
+        # Convert from (y, x, z, c) to (x, y, z, c) and extract channels
+        scs_image = np.transpose(scs_image, (1, 0, 2, 3))
+        r_cube = scs_image[:, :, :, 0]
+        g_cube = scs_image[:, :, :, 1]
+        b_cube = scs_image[:, :, :, 2]
+        
+        # Handle surface closing
+        x_vofs = y_vofs = z_vofs = 0
+        tt_xs, tt_ys, tt_zs = tile_xs, tile_ys, tile_zs
+        
+        if param.get('closesurfaces', 0) == 1:
+            if tx == 0:
+                r_cube = np.concatenate([np.zeros((1, r_cube.shape[1], r_cube.shape[2]), dtype=r_cube.dtype), r_cube], axis=0)
+                g_cube = np.concatenate([np.zeros((1, g_cube.shape[1], g_cube.shape[2]), dtype=g_cube.dtype), g_cube], axis=0)
+                b_cube = np.concatenate([np.zeros((1, b_cube.shape[1], b_cube.shape[2]), dtype=b_cube.dtype), b_cube], axis=0)
+                x_vofs = -1
+                tt_xs += 1
+            if ty == 0:
+                r_cube = np.concatenate([np.zeros((r_cube.shape[0], 1, r_cube.shape[2]), dtype=r_cube.dtype), r_cube], axis=1)
+                g_cube = np.concatenate([np.zeros((g_cube.shape[0], 1, g_cube.shape[2]), dtype=g_cube.dtype), g_cube], axis=1)
+                b_cube = np.concatenate([np.zeros((b_cube.shape[0], 1, b_cube.shape[2]), dtype=b_cube.dtype), b_cube], axis=1)
+                y_vofs = -1
+                tt_ys += 1
+            if tz == 0:
+                r_cube = np.concatenate([np.zeros((r_cube.shape[0], r_cube.shape[1], 1), dtype=r_cube.dtype), r_cube], axis=2)
+                g_cube = np.concatenate([np.zeros((g_cube.shape[0], g_cube.shape[1], 1), dtype=g_cube.dtype), g_cube], axis=2)
+                b_cube = np.concatenate([np.zeros((b_cube.shape[0], b_cube.shape[1], 1), dtype=b_cube.dtype), b_cube], axis=2)
+                z_vofs = -1
+                tt_zs += 1
+            if tx == param['nr_x_tiles'] - 1:
+                r_cube = np.concatenate([r_cube, np.zeros((1, r_cube.shape[1], r_cube.shape[2]), dtype=r_cube.dtype)], axis=0)
+                g_cube = np.concatenate([g_cube, np.zeros((1, g_cube.shape[1], g_cube.shape[2]), dtype=g_cube.dtype)], axis=0)
+                b_cube = np.concatenate([b_cube, np.zeros((1, b_cube.shape[1], b_cube.shape[2]), dtype=b_cube.dtype)], axis=0)
+                tt_xs += 1
+            if ty == param['nr_y_tiles'] - 1:
+                r_cube = np.concatenate([r_cube, np.zeros((r_cube.shape[0], 1, r_cube.shape[2]), dtype=r_cube.dtype)], axis=1)
+                g_cube = np.concatenate([g_cube, np.zeros((g_cube.shape[0], 1, g_cube.shape[2]), dtype=g_cube.dtype)], axis=1)
+                b_cube = np.concatenate([b_cube, np.zeros((b_cube.shape[0], 1, b_cube.shape[2]), dtype=b_cube.dtype)], axis=1)
+                tt_ys += 1
+            if tz == param['nr_z_tiles'] - 1:
+                r_cube = np.concatenate([r_cube, np.zeros((r_cube.shape[0], r_cube.shape[1], 1), dtype=r_cube.dtype)], axis=2)
+                g_cube = np.concatenate([g_cube, np.zeros((g_cube.shape[0], g_cube.shape[1], 1), dtype=g_cube.dtype)], axis=2)
+                b_cube = np.concatenate([b_cube, np.zeros((b_cube.shape[0], b_cube.shape[1], 1), dtype=b_cube.dtype)], axis=2)
+                tt_zs += 1
+        
+        first_block_slice = param.get('block_slice_numbers', [[tile_z1]])[tz][0] if slice_step > 1 else tile_z1
+        
+        # Extract isosurfaces based on mode
+        extract_which = param.get('extractwhich', 5)
+        
+        if extract_which == 10:
+            # Extract unique colors as individual objects
+            self._extract_unique_colors(
+                r_cube, g_cube, b_cube, tx, ty, tz,
+                tile_x1, tile_y1, tile_z1,
+                x_vofs, y_vofs, z_vofs,
+                first_block_slice, slice_step, block_nr
+            )
+        else:
+            # Extract RGB layers or brightness levels
+            self._extract_layers_or_levels(
+                r_cube, g_cube, b_cube, tx, ty, tz,
+                tile_x1, tile_y1, tile_z1,
+                x_vofs, y_vofs, z_vofs,
+                first_block_slice, slice_step, extract_which
+            )
+    
+    def _extract_unique_colors(self, r_cube: np.ndarray, g_cube: np.ndarray, b_cube: np.ndarray,
+                               tx: int, ty: int, tz: int,
+                               tile_x1: int, tile_y1: int, tile_z1: int,
+                               x_vofs: int, y_vofs: int, z_vofs: int,
+                               first_block_slice: int, slice_step: int, block_nr: int):
+        """
+        Extract unique colors as individual 3D objects (mode 10)
+        
+        Args:
+            r_cube, g_cube, b_cube: RGB data cubes
+            tx, ty, tz: Block indices
+            tile_x1, tile_y1, tile_z1: Tile positions
+            x_vofs, y_vofs, z_vofs: Offset for surface closing
+            first_block_slice: First slice number in this block
+            slice_step: Slice stepping factor
+            block_nr: Block number for indexing
+        """
+        param = self.param
+        
+        # Combine RGB into single color value (R << 16 | G << 8 | B)
+        col_cube = (r_cube.astype(np.int32) << 16) + (g_cube.astype(np.int32) << 8) + b_cube.astype(np.int32)
+        
+        # Count unique colors (histogram)
+        unique_colors, counts = np.unique(col_cube[col_cube != 0], return_counts=True)
+        
+        if len(unique_colors) == 0:
+            return
+        
+        # Update volume counts
+        for color, count in zip(unique_colors, counts):
+            param['object_volume'][color] += count
+        
+        logging.debug(f"Found {len(unique_colors)} unique colors in block ({tx},{ty},{tz})")
+        
+        # Extract surface for each unique color
+        for col_idx, color in enumerate(unique_colors):
+            if self.canceled:
+                break
+            
+            # Create binary mask for this color
+            subseg = (col_cube == color).astype(float)
+            
+            # Skip if dimensions are invalid
+            if subseg.ndim != 3:
+                continue
+            
+            # Extract isosurface
+            try:
+                verts, faces, normals, values_mc = measure.marching_cubes(subseg, level=0.5)
+                
+                if len(verts) > 0:
+                    # Adjust coordinates
+                    verts[:, 0] += y_vofs
+                    verts[:, 1] += x_vofs
+                    verts[:, 2] += z_vofs
+                    
+                    verts[:, 0] += tile_y1
+                    verts[:, 1] += tile_x1
+                    
+                    if slice_step == 1:
+                        verts[:, 2] += tile_z1
+                    else:
+                        verts[:, 2] = ((verts[:, 2] - 0.5) * slice_step) + 0.5 + first_block_slice
+                    
+                    # Scale to physical units
+                    verts[:, 0] *= param.get('yscale', 1.0) * param.get('yunit', 1.0) * param['mipfacty']
+                    verts[:, 1] *= param.get('xscale', 1.0) * param.get('xunit', 1.0) * param['mipfactx']
+                    verts[:, 2] *= param.get('zscale', 1.0) * param.get('zunit', 1.0) * param['mipfactz']
+                    
+                    # Store with block indexing
+                    idx = tz * param['nr_y_tiles'] * param['nr_x_tiles'] + ty * param['nr_x_tiles'] + tx
+                    param['fvindex'][(int(color), idx)] = block_nr
+                    param['farray'][block_nr] = faces
+                    param['varray'][block_nr] = verts
+                    
+            except Exception as e:
+                logging.warning(f"Failed to extract color {color:06X} in block ({tx},{ty},{tz}): {e}")
+    
+    def _extract_layers_or_levels(self, r_cube: np.ndarray, g_cube: np.ndarray, b_cube: np.ndarray,
+                                  tx: int, ty: int, tz: int,
+                                  tile_x1: int, tile_y1: int, tile_z1: int,
+                                  x_vofs: int, y_vofs: int, z_vofs: int,
+                                  first_block_slice: int, slice_step: int, extract_which: int):
+        """
+        Extract RGB layers or brightness levels (modes 5-9)
+        
+        Args:
+            r_cube, g_cube, b_cube: RGB data cubes
+            tx, ty, tz: Block indices
+            tile_x1, tile_y1, tile_z1: Tile positions
+            x_vofs, y_vofs, z_vofs: Offset for surface closing
+            first_block_slice: First slice number in this block
+            slice_step: Slice stepping factor
+            extract_which: Extraction mode (5=RGB, 6-9=brightness levels)
+        """
+        param = self.param
+        
+        # Compute brightness cube if needed
+        if extract_which in [6, 7, 8, 9]:
+            cube = ((r_cube.astype(np.int32) + g_cube.astype(np.int32) + b_cube.astype(np.int32)) / 3).astype(np.uint8)
+        
+        # Process each object/layer
+        objects = param.get('objects', [])
+        
+        for obj_idx in range(len(objects)):
+            if self.canceled:
+                break
+            
+            # Determine which subsegment to extract
+            if extract_which == 5:  # RGB layers
+                if obj_idx == 0:
+                    subseg = (r_cube > 128).astype(float)
+                elif obj_idx == 1:
+                    subseg = (g_cube > 128).astype(float)
+                elif obj_idx == 2:
+                    subseg = (b_cube > 128).astype(float)
+                else:
+                    continue
+            elif extract_which in [6, 7, 8, 9]:  # Brightness levels
+                lev = param.get('lev', [128])
+                if obj_idx >= len(lev):
+                    continue
+                subseg = (cube > lev[obj_idx]).astype(float)
+            else:
+                continue
+            
+            # Skip if dimensions are invalid
+            if subseg.ndim != 3:
+                continue
+            
+            # Extract isosurface
+            try:
+                verts, faces, normals, values_mc = measure.marching_cubes(subseg, level=0.5)
+                
+                if len(verts) > 0:
+                    # Adjust coordinates
+                    verts[:, 0] += y_vofs
+                    verts[:, 1] += x_vofs
+                    verts[:, 2] += z_vofs
+                    
+                    verts[:, 0] += tile_y1
+                    verts[:, 1] += tile_x1
+                    
+                    if slice_step == 1:
+                        verts[:, 2] += tile_z1
+                    else:
+                        verts[:, 2] = ((verts[:, 2] - 0.5) * slice_step) + 0.5 + first_block_slice
+                    
+                    # Scale to physical units
+                    verts[:, 0] *= param.get('yscale', 1.0) * param.get('yunit', 1.0) * param['mipfacty']
+                    verts[:, 1] *= param.get('xscale', 1.0) * param.get('xunit', 1.0) * param['mipfactx']
+                    verts[:, 2] *= param.get('zscale', 1.0) * param.get('zunit', 1.0) * param['mipfactz']
+                    
+                    # Store faces and vertices
+                    param['farray'][(obj_idx, tx, ty, tz)] = faces
+                    param['varray'][(obj_idx, tx, ty, tz)] = verts
+                    
+            except Exception as e:
+                logging.warning(f"Failed to extract object {obj_idx} in block ({tx},{ty},{tz}): {e}")
 
 
 # Example usage:

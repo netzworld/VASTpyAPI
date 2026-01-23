@@ -165,7 +165,7 @@ class SurfaceExtractor:
         max_object_number = param.get('max_object_number', 0)
         
         if slice_step == 1:
-            seg_image, values, numbers, bboxes, res = self.vast.get_seg_image_rle_decoded_bboxes(
+            seg_image, values, numbers, bboxes = self.vast.get_seg_image_rle_decoded_bboxes(
                     param['miplevel'],
                     tile_x1 - edx[0, 0], tile_x2 + edx[0, 1],
                     tile_y1 - edx[1, 0], tile_y2 + edx[1, 1],
@@ -192,7 +192,7 @@ class SurfaceExtractor:
             first_block_slice = bs[0]
             
             for i, slice_num in enumerate(bs):
-                s_seg_image, s_values, s_numbers, s_bboxes, res = self.vast.get_seg_image_rle_decoded_bboxes(
+                s_seg_image, s_values, s_numbers, s_bboxes = self.vast.get_seg_image_rle_decoded_bboxes(
                         param['miplevel'],
                         tile_x1 - edx[0, 0], tile_x2 + edx[0, 1],
                         tile_y1 - edx[1, 0], tile_y2 + edx[1, 1],
@@ -225,11 +225,12 @@ class SurfaceExtractor:
             seg_image = ndimage.binary_opening(seg_image, structure=strel).astype(np.uint16)
             
             # Crop padding
-            seg_image = seg_image[
-                edx[0, 0]:(seg_image.shape[0] - edx[0, 1]) if edx[0, 1] > 0 else seg_image.shape[0],
-                edx[1, 0]:(seg_image.shape[1] - edx[1, 1]) if edx[1, 1] > 0 else seg_image.shape[1],
-                edx[2, 0]:(seg_image.shape[2] - edx[2, 1]) if edx[2, 1] > 0 else seg_image.shape[2]
-            ]
+            if seg_image is not None and seg_image.ndim >= 3:
+                sh = seg_image.shape  # type: ignore
+                x_end = int(sh[0] - edx[0, 1]) if edx[0, 1] > 0 else int(sh[0])  # type: ignore
+                y_end = int(sh[1] - edx[1, 1]) if edx[1, 1] > 0 else int(sh[1])  # type: ignore
+                z_end = int(sh[2] - edx[2, 1]) if edx[2, 1] > 0 else int(sh[2])  # type: ignore
+                seg_image = seg_image[edx[0, 0]:x_end, edx[1, 0]:y_end, edx[2, 0]:z_end]
             
             # Adjust bboxes
             if bboxes is not None and len(bboxes) > 0:
@@ -239,7 +240,8 @@ class SurfaceExtractor:
                     bboxes[:, [0, 3]] = bb
                 if edx[0, 1] > 0:
                     bb = bboxes[:, [0, 3]]
-                    bb[bb > seg_image.shape[0]] = seg_image.shape[0]
+                    sh0 = int(seg_image.shape[0]) if seg_image is not None else 0  # type: ignore
+                    bb[bb > sh0] = sh0
                     bboxes[:, [0, 3]] = bb
                 
                 if edx[1, 0] > 0:
@@ -248,7 +250,8 @@ class SurfaceExtractor:
                     bboxes[:, [1, 4]] = bb
                 if edx[1, 1] > 0:
                     bb = bboxes[:, [1, 4]]
-                    bb[bb > seg_image.shape[1]] = seg_image.shape[1]
+                    sh1 = int(seg_image.shape[1]) if seg_image is not None else 0  # type: ignore
+                    bb[bb > sh1] = sh1
                     bboxes[:, [1, 4]] = bb
                 
                 if edx[2, 0] > 0:
@@ -257,7 +260,8 @@ class SurfaceExtractor:
                     bboxes[:, [2, 5]] = bb
                 if edx[2, 1] > 0:
                     bb = bboxes[:, [2, 5]]
-                    bb[bb > seg_image.shape[2]] = seg_image.shape[2]
+                    sh2 = int(seg_image.shape[2]) if seg_image is not None else 0  # type: ignore
+                    bb[bb > sh2] = sh2
                     bboxes[:, [2, 5]] = bb
         
         # Process segmentation data
@@ -278,39 +282,45 @@ class SurfaceExtractor:
         x_vofs = y_vofs = z_vofs = 0
         tt_xs, tt_ys, tt_zs = tile_xs, tile_ys, tile_zs
         
-        if param.get('closesurfaces', 0) == 1:
+        if param.get('closesurfaces', 0) == 1 and seg_image is not None:
+            sh = seg_image.shape  # type: ignore
             if tx == 0:
-                seg_image = np.concatenate([np.zeros((1, seg_image.shape[1], seg_image.shape[2]), dtype=seg_image.dtype), 
+                seg_image = np.concatenate([np.zeros((1, int(sh[1]), int(sh[2])), dtype=seg_image.dtype),  # type: ignore
                                            seg_image], axis=0)
                 bboxes[:, 0] += 1
                 bboxes[:, 3] += 1
                 x_vofs -= 1
                 tt_xs += 1
             if ty == 0:
-                seg_image = np.concatenate([np.zeros((seg_image.shape[0], 1, seg_image.shape[2]), dtype=seg_image.dtype), 
+                sh = seg_image.shape  # type: ignore
+                seg_image = np.concatenate([np.zeros((int(sh[0]), 1, int(sh[2])), dtype=seg_image.dtype),  # type: ignore
                                            seg_image], axis=1)
                 bboxes[:, 1] += 1
                 bboxes[:, 4] += 1
                 y_vofs -= 1
                 tt_ys += 1
             if tz == 0:
-                seg_image = np.concatenate([np.zeros((seg_image.shape[0], seg_image.shape[1], 1), dtype=seg_image.dtype), 
+                sh = seg_image.shape  # type: ignore
+                seg_image = np.concatenate([np.zeros((int(sh[0]), int(sh[1]), 1), dtype=seg_image.dtype),  # type: ignore
                                            seg_image], axis=2)
                 bboxes[:, 2] += 1
                 bboxes[:, 5] += 1
                 z_vofs -= 1
                 tt_zs += 1
             if tx == param['nr_x_tiles'] - 1:
+                sh = seg_image.shape  # type: ignore
                 seg_image = np.concatenate([seg_image,
-                                           np.zeros((1, seg_image.shape[1], seg_image.shape[2]), dtype=seg_image.dtype)], axis=0)
+                                           np.zeros((1, int(sh[1]), int(sh[2])), dtype=seg_image.dtype)], axis=0)  # type: ignore
                 tt_xs += 1
             if ty == param['nr_y_tiles'] - 1:
+                sh = seg_image.shape  # type: ignore
                 seg_image = np.concatenate([seg_image,
-                                           np.zeros((seg_image.shape[0], 1, seg_image.shape[2]), dtype=seg_image.dtype)], axis=1)
+                                           np.zeros((int(sh[0]), 1, int(sh[2])), dtype=seg_image.dtype)], axis=1)  # type: ignore
                 tt_ys += 1
             if tz == param['nr_z_tiles'] - 1:
+                sh = seg_image.shape  # type: ignore
                 seg_image = np.concatenate([seg_image,
-                                           np.zeros((seg_image.shape[0], seg_image.shape[1], 1), dtype=seg_image.dtype)], axis=2)
+                                           np.zeros((int(sh[0]), int(sh[1]), 1), dtype=seg_image.dtype)], axis=2)  # type: ignore
                 tt_zs += 1
         
         # Extract surfaces for each segment
@@ -463,14 +473,16 @@ class SurfaceExtractor:
             
             for i, slice_num in enumerate(bs):
                 scs_slice = self.vast.get_screenshot_image(param['miplevel'], tile_x1, tile_x2, tile_y1, tile_y2, slice_num, slice_num, True, True) 
-                
-
-                scs_image[:, :, i, :] = scs_slice
+                if scs_slice is not None:
+                    scs_image[:, :, i, :] = scs_slice
         
         logging.debug(f"Processing screenshot block ({tx},{ty},{tz})...")
         
         # Convert from (y, x, z, c) to (x, y, z, c) and extract channels
-        scs_image = np.transpose(scs_image, (1, 0, 2, 3))
+        if scs_image is not None:
+            scs_image = np.transpose(scs_image, (1, 0, 2, 3))
+        else:
+            return
         r_cube = scs_image[:, :, :, 0]
         g_cube = scs_image[:, :, :, 1]
         b_cube = scs_image[:, :, :, 2]
@@ -536,6 +548,168 @@ class SurfaceExtractor:
                 first_block_slice, slice_step, extract_which
             )
 
+    def _extract_unique_colors(self, r_cube: np.ndarray, g_cube: np.ndarray, b_cube: np.ndarray,
+                            tx: int, ty: int, tz: int,
+                            tile_x1: int, tile_y1: int, tile_z1: int,
+                            x_vofs: int, y_vofs: int, z_vofs: int,
+                            first_block_slice: int, slice_step: int, block_nr: int):
+        """
+        Extract unique colors as individual 3D objects (mode 10)
+        
+        Args:
+            r_cube, g_cube, b_cube: RGB data cubes
+            tx, ty, tz: Block indices
+            tile_x1, tile_y1, tile_z1: Tile positions
+            x_vofs, y_vofs, z_vofs: Offset for surface closing
+            first_block_slice: First slice number in this block
+            slice_step: Slice stepping factor
+            block_nr: Block number for indexing
+        """
+        param = self.param
+        
+        # Combine RGB into single color value (R << 16 | G << 8 | B)
+        col_cube = (r_cube.astype(np.int32) << 16) + (g_cube.astype(np.int32) << 8) + b_cube.astype(np.int32)
+        
+        # Count unique colors (histogram)
+        unique_colors, counts = np.unique(col_cube[col_cube != 0], return_counts=True)
+        
+        if len(unique_colors) == 0:
+            return
+        
+        # Update volume counts
+        for color, count in zip(unique_colors, counts):
+            param['object_volume'][color] += count
+        
+        logging.debug(f"Found {len(unique_colors)} unique colors in block ({tx},{ty},{tz})")
+        
+        # Extract surface for each unique color
+        for col_idx, color in enumerate(unique_colors):
+            if self.canceled:
+                break
+            
+            # Create binary mask for this color
+            subseg = (col_cube == color).astype(float)
+            
+            # Skip if dimensions are invalid
+            if subseg.ndim != 3:
+                continue
+            
+            # Extract isosurface
+            try:
+                verts, faces, normals, values_mc = measure.marching_cubes(subseg, level=0.5)
+                
+                if len(verts) > 0:
+                    # Adjust coordinates
+                    verts[:, 0] += y_vofs
+                    verts[:, 1] += x_vofs
+                    verts[:, 2] += z_vofs
+                    
+                    verts[:, 0] += tile_y1
+                    verts[:, 1] += tile_x1
+                    
+                    if slice_step == 1:
+                        verts[:, 2] += tile_z1
+                    else:
+                        verts[:, 2] = ((verts[:, 2] - 0.5) * slice_step) + 0.5 + first_block_slice
+                    
+                    # Scale to physical units
+                    verts[:, 0] *= param.get('yscale', 1.0) * param.get('yunit', 1.0) * param['mipfacty']
+                    verts[:, 1] *= param.get('xscale', 1.0) * param.get('xunit', 1.0) * param['mipfactx']
+                    verts[:, 2] *= param.get('zscale', 1.0) * param.get('zunit', 1.0) * param['mipfactz']
+                    
+                    # Store with block indexing
+                    idx = tz * param['nr_y_tiles'] * param['nr_x_tiles'] + ty * param['nr_x_tiles'] + tx
+                    param['fvindex'][(int(color), idx)] = block_nr
+                    param['farray'][block_nr] = faces
+                    param['varray'][block_nr] = verts
+                    
+            except Exception as e:
+                logging.warning(f"Failed to extract color {color:06X} in block ({tx},{ty},{tz}): {e}")
+
+    def _extract_layers_or_levels(self, r_cube: np.ndarray, g_cube: np.ndarray, b_cube: np.ndarray,
+                                  tx: int, ty: int, tz: int,
+                                  tile_x1: int, tile_y1: int, tile_z1: int,
+                                  x_vofs: int, y_vofs: int, z_vofs: int,
+                                  first_block_slice: int, slice_step: int, extract_which: int):
+        """
+        Extract RGB layers or brightness levels (modes 5-9)
+        
+        Args:
+            r_cube, g_cube, b_cube: RGB data cubes
+            tx, ty, tz: Block indices
+            tile_x1, tile_y1, tile_z1: Tile positions
+            x_vofs, y_vofs, z_vofs: Offset for surface closing
+            first_block_slice: First slice number in this block
+            slice_step: Slice stepping factor
+            extract_which: Extraction mode (5=RGB, 6-9=brightness levels)
+        """
+        param = self.param
+        
+        # Compute brightness cube if needed
+        cube = None
+        if extract_which in [6, 7, 8, 9]:
+            cube = ((r_cube.astype(np.int32) + g_cube.astype(np.int32) + b_cube.astype(np.int32)) / 3).astype(np.uint8)
+        
+        # Process each object/layer
+        objects = param.get('objects', [])
+        
+        for obj_idx in range(len(objects)):
+            if self.canceled:
+                break
+            
+            # Determine which subsegment to extract
+            if extract_which == 5:  # RGB layers
+                if obj_idx == 0:
+                    subseg = (r_cube > 128).astype(float)
+                elif obj_idx == 1:
+                    subseg = (g_cube > 128).astype(float)
+                elif obj_idx == 2:
+                    subseg = (b_cube > 128).astype(float)
+                else:
+                    continue
+            elif extract_which in [6, 7, 8, 9]:  # Brightness levels
+                lev = param.get('lev', [128])
+                if obj_idx >= len(lev):
+                    continue
+                subseg = (cube > lev[obj_idx]).astype(float)
+            else:
+                continue
+            
+            # Skip if dimensions are invalid
+            if subseg.ndim != 3:
+                continue
+            
+            # Extract isosurface
+            try:
+                verts, faces, normals, values_mc = measure.marching_cubes(subseg, level=0.5)
+                
+                if len(verts) > 0:
+                    # Adjust coordinates
+                    verts[:, 0] += y_vofs
+                    verts[:, 1] += x_vofs
+                    verts[:, 2] += z_vofs
+                    
+                    verts[:, 0] += tile_y1
+                    verts[:, 1] += tile_x1
+                    
+                    if slice_step == 1:
+                        verts[:, 2] += tile_z1
+                    else:
+                        verts[:, 2] = ((verts[:, 2] - 0.5) * slice_step) + 0.5 + first_block_slice
+                    
+                    # Scale to physical units
+                    verts[:, 0] *= param.get('yscale', 1.0) * param.get('yunit', 1.0) * param['mipfacty']
+                    verts[:, 1] *= param.get('xscale', 1.0) * param.get('xunit', 1.0) * param['mipfactx']
+                    verts[:, 2] *= param.get('zscale', 1.0) * param.get('zunit', 1.0) * param['mipfactz']
+                    
+                    # Store faces and vertices
+                    param['farray'][(obj_idx, tx, ty, tz)] = faces
+                    param['varray'][(obj_idx, tx, ty, tz)] = verts
+                    
+            except Exception as e:
+                logging.warning(f"Failed to extract object {obj_idx} in block ({tx},{ty},{tz}): {e}")
+
+
     def extract_surfaces(self):
         """
         Extract 3D surfaces from VAST segmentation or screenshot data.
@@ -566,11 +740,15 @@ class SurfaceExtractor:
 
         if extract_seg:
             # ===== SEGMENTATION EXPORT =====
-            data, res = self.vast.get_all_segment_data_matrix()
-            if data is None:
+            data = self.vast.get_all_segment_data_matrix()
+            if len(data) == 0 or data is None:
                 print("Did not get data from segment data matrix")
                 return
-            names, res = self.vast.get_all_segment_names()
+            # Extract data matrix from return tuple if needed and convert to numpy array
+            if isinstance(data, tuple):
+                data = data[0]  # First element is the data matrix
+            data = np.array(data)  # Convert to NumPy array for indexing
+            names = self.vast.get_all_segment_names()
             if names is None: 
                 print("Did not get segment names")
                 return
@@ -580,8 +758,8 @@ class SurfaceExtractor:
                 return
             
             names = names[1:] # Remove background name
-
-            max_object_number = int(np.max(data[:, 0]))
+ 
+            max_object_number = int(np.max(data[0]))
             
             # Get segment data
             all_seg_data = self.vast.get_all_segment_data()
@@ -653,6 +831,8 @@ class SurfaceExtractor:
         y_max = (rparam['ymax'] >> param['miplevel']) - 1
 
         # Get mip scale factors
+        if mip_scale_matrix is not None:
+            mip_scale_matrix = np.array(mip_scale_matrix)
         if param['miplevel'] > 0 and mip_scale_matrix is not None:
             mip_fact_x = mip_scale_matrix[param['miplevel']][0]
             mip_fact_y = mip_scale_matrix[param['miplevel']][1]
@@ -699,15 +879,24 @@ class SurfaceExtractor:
         print(f"Initialization complete. Extract mode: {'segmentation' if extract_seg else 'screenshots'}")
 
         if extract_seg: # ===== COMPUTE FULL NAMES (including folder hierarchy) =====
+            # Convert data to numpy array for easier indexing
+            data = np.array(data)
             if param.get('includefoldernames', 0) == 1:
                 logging.info("Computing full names with folder hierarchy...")
                 full_names = names.copy()
+                id_to_index = {int(data[i, 0]): i for i in range(len(data))}
                 for i in range(len(data)):
                     j = i
-                    # Traverse up the hierarchy (column 14 is parent ID)
-                    while data[j][13] != 0:  # Check if parent is not 0
-                        j = int(data[j][13])
-                        full_names[i] = names[j] + '.' + full_names[i]
+                    # Traverse up the hierarchy (column 13 is parent ID, 0-indexed)
+                    while data[j, 13] != 0:  # Check if parent is not 0
+                        parent_id = int(data[j, 13])
+                        # Find the index of the parent in the data array
+                        if parent_id in id_to_index:
+                            j = id_to_index[parent_id]
+                            full_names[i] = names[j] + '.' + full_names[i]
+                        else:
+                            logging.warning(f"Parent ID {parent_id} not found for object at index {i}")
+                            break
                 names = full_names
                 logging.debug(f"Sample full name: {names[0] if names else 'N/A'}")
 
@@ -716,44 +905,44 @@ class SurfaceExtractor:
 
             if extract_which == 1:
                 # All segments individually, uncollapsed
-                objects = np.column_stack([data[:][0], data[:][1]]).astype(np.uint32)
+                objects = np.column_stack([data[:, 0], data[:, 1]]).astype(np.uint32)
                 self.vast.set_seg_translation([], [])
                 logging.info(f"Mode 1: Exporting {len(objects)} individual segments")
             elif extract_which == 2:
                 # All segments, collapsed as in VAST
-                objects = np.unique(data[:][17])  # Column 18 in MATLAB (0-indexed: 17)
-                objects = np.column_stack([objects, data[objects.astype(int)][1]]).astype(np.uint32)
-                self.vast.set_seg_translation(data[:][0], data[:][17])
+                objects = np.unique(data[:, 17])  # Column 18 in MATLAB (0-indexed: 17)
+                objects = np.column_stack([objects, data[objects.astype(int), 1]]).astype(np.uint32)
+                self.vast.set_seg_translation(data[:, 0].tolist(), data[:, 17].tolist())
                 logging.info(f"Mode 2: Exporting {len(objects)} collapsed segments")               
             elif extract_which == 3:
                 # Selected segment and children, uncollapsed
-                selected = np.where((data[:][1] & 65536) > 0)[0]
+                selected = np.where((data[:, 1] & 65536) > 0)[0]
                 if len(selected) == 0:
-                    objects = np.column_stack([data[:][0], data[:][1]]).astype(np.uint32)
+                    objects = np.column_stack([data[:, 0], data[:, 1]]).astype(np.uint32)
                     logging.warning("No segments selected, exporting all")
                 else:
                     selected = np.concatenate([selected, self._get_child_tree_ids_seg(data, selected)])
-                    objects = np.column_stack([selected, data[selected][1]]).astype(np.uint32)
+                    objects = np.column_stack([selected, data[selected, 1]]).astype(np.uint32)
                     logging.info(f"Mode 3: Exporting {len(objects)} selected segments + children")
-                self.vast.set_seg_translation(data[selected][0], data[selected][0])         
+                self.vast.set_seg_translation(data[selected, 0].tolist(), data[selected, 0].tolist())         
             elif extract_which == 4:
                 # Selected segment and children, collapsed as in VAST
-                selected = np.where((data[:][1] & 65536) > 0)[0]
+                selected = np.where((data[:, 1] & 65536) > 0)[0]
                 if len(selected) == 0:
                     # None selected: choose all, collapsed
-                    selected = data[:][0].astype(int)
-                    objects = np.unique(data[:][17])
+                    selected = data[:, 0].astype(int)
+                    objects = np.unique(data[:, 17])
                     logging.warning("No segments selected, exporting all collapsed")
                 else:
                     selected = np.concatenate([selected, self._get_child_tree_ids_seg(data, selected)])
-                    objects = np.unique(data[selected.astype(int)][17])
+                    objects = np.unique(data[selected.astype(int), 17])
                     logging.info(f"Mode 4: Exporting {len(objects)} collapsed selected segments + children")
                 
-                objects = np.column_stack([objects, data[objects.astype(int)][1]]).astype(np.uint32)
-                self.vast.set_seg_translation(data[selected.astype(int)][0], data[selected.astype(int)][17])           
+                objects = np.column_stack([objects, data[objects.astype(int), 1]]).astype(np.uint32)
+                self.vast.set_seg_translation(data[selected.astype(int), 0].tolist(), data[selected.astype(int), 17].tolist())           
             else:
                 logging.error(f"Unknown extractwhich value: {extract_which}")
-                objects = np.column_stack([data[:][0], data[:][1]]).astype(np.uint32)
+                objects = np.column_stack([data[:, 0], data[:, 1]]).astype(np.uint32)
             
             self.objects = objects
             param['objects'] = objects
@@ -836,7 +1025,7 @@ class SurfaceExtractor:
                 slice_step = param.get('slicestep', 1)
             
                 if slice_step == 1:
-                    mc_seg_image, values, numbers, bboxes, res = \
+                    mc_seg_image, values, numbers, bboxes = \
                         self.vast.get_seg_image_rle_decoded_bboxes(
                             mip_region_mip, c_x_min, c_x_max, c_y_min, c_y_max, c_z_min, c_z_max, False
                         )
@@ -846,7 +1035,7 @@ class SurfaceExtractor:
                     mc_seg_image = np.zeros((c_x_max - c_x_min + 1, c_y_max - c_y_min + 1, len(slices)))
                     
                     for idx, slice_num in enumerate(slices):
-                        mc_seg_slice, values, numbers, bboxes, res = \
+                        mc_seg_slice, values, numbers, bboxes = \
                             self.vast.get_seg_image_rle_decoded_bboxes(
                                 mip_region_mip, c_x_min, c_x_max, c_y_min, c_y_max, 
                                 slice_num, slice_num, False
@@ -864,7 +1053,10 @@ class SurfaceExtractor:
                         mip_region_mip, c_x_min, c_x_max, c_y_min, c_y_max, c_z_min, c_z_max, False
                     )
                     # Convert from (y, x, z, c) to (x, y, z) and make binary
-                    mc_seg_image = np.transpose(np.sum(mc_seg_image, axis=3) > 0, (1, 0, 2))
+                    if mc_seg_image is not None:
+                        mc_seg_image = np.transpose(np.sum(mc_seg_image, axis=3) > 0, (1, 0, 2))
+                    else:
+                        mc_seg_image = np.zeros((c_x_max - c_x_min + 1, c_y_max - c_y_min + 1, c_z_max - c_z_min + 1))
                 else:
                     slices = list(range(c_z_min, c_z_max + 1, slice_step))
                     mc_seg_image = np.zeros((c_x_max - c_x_min + 1, c_y_max - c_y_min + 1, len(slices)))
@@ -927,11 +1119,11 @@ class SurfaceExtractor:
                         
                         # Compute tile coords on constraint mip
                         c_min_x = max(0, int(floor((tile_x1 - x_min) / c_mip_fact_x)))
-                        c_max_x = min(mc_seg_image.shape[0] - 1, int(ceil((tile_x2 - x_min) / c_mip_fact_x)))
+                        c_max_x = min(mc_seg_image.shape[0] - 1, int(ceil((tile_x2 - x_min) / c_mip_fact_x))) if len(mc_seg_image.shape) > 0 else 0
                         c_min_y = max(0, int(floor((tile_y1 - y_min) / c_mip_fact_y)))
-                        c_max_y = min(mc_seg_image.shape[1] - 1, int(ceil((tile_y2 - y_min) / c_mip_fact_y)))
+                        c_max_y = min(mc_seg_image.shape[1] - 1, int(ceil((tile_y2 - y_min) / c_mip_fact_y))) if len(mc_seg_image.shape) > 1 else 0
                         c_min_z = max(0, int(floor((tile_z1 - z_min) / c_mip_fact_z)))
-                        c_max_z = min(mc_seg_image.shape[2] - 1, int(ceil((tile_z2 - z_min) / c_mip_fact_z)))
+                        c_max_z = min(mc_seg_image.shape[2] - 1, int(ceil((tile_z2 - z_min) / c_mip_fact_z))) if len(mc_seg_image.shape) > 2 else 0
                         
                         # Crop region from constraint mip
                         crop_region = mc_seg_image[c_min_x:c_max_x+1, c_min_y:c_max_y+1, c_min_z:c_max_z+1]
@@ -995,8 +1187,8 @@ class SurfaceExtractor:
                 print(f"Initialized storage for {num_objects} screenshot-based objects")
                 logging.info(f"Storage for {num_objects} objects x {nr_x_tiles * nr_y_tiles * nr_z_tiles} blocks")
 
-        x_min, y_min, z_min = param['xmin'], param['ymin'], param['zmin']
-        x_max, y_max, z_max = param['xmax'], param['ymax'], param['zmax']
+        x_min, y_min, z_min = rparam['xmin'], rparam['ymin'], rparam['zmin']
+        x_max, y_max, z_max = rparam['xmax'], rparam['ymax'], rparam['zmax']
         nr_x_tiles = param['nr_x_tiles']
         nr_y_tiles = param['nr_y_tiles']
         nr_z_tiles = param['nr_z_tiles']
@@ -1012,6 +1204,14 @@ class SurfaceExtractor:
         print("Starting surface extraction...")
         print("=" * 60)
 
+        # Ensure data is numpy array for processing
+        if extract_seg and isinstance(data, list):
+            data = np.array(data)
+        
+        # Ensure mip_scale_matrix is numpy array if present
+        if mip_scale_matrix is not None and isinstance(mip_scale_matrix, list):
+            mip_scale_matrix = np.array(mip_scale_matrix)
+        
         block_nr = 0  # For mode 10 color tracking
         total_blocks = nr_x_tiles * nr_y_tiles * nr_z_tiles
         processed_blocks = 0
@@ -1056,7 +1256,7 @@ class SurfaceExtractor:
                     if extract_seg:
                         self._process_segmentation_block(
                             tx, ty, tz, tile_x1, tile_x2, tile_y1, tile_y2, tile_z1, tile_z2,
-                            tile_xs, tile_ys, tile_zs, data, mip_scale_matrix
+                            tile_xs, tile_ys, tile_zs, data, mip_scale_matrix  # type: ignore
                         )
                     else:
                         self._process_screenshot_block(
@@ -1081,290 +1281,290 @@ class SurfaceExtractor:
         
         logging.info(f"Block processing complete: {processed_blocks} processed, {skipped_blocks} skipped")
 
-    def merge_meshes(f1, v1, f2, v2):
-        """
-        Merge two meshes defined by (f1, v1) and (f2, v2).
-        
-        Merges meshes by identifying and merging duplicate vertices in the overlapping region,
-        then re-indexing face indices appropriately.
-        
-        Args:
-            f1: Face indices array for mesh 1 (Nx3)
-            v1: Vertex coordinates array for mesh 1 (Mx3)
-            f2: Face indices array for mesh 2 (Nx3)
-            v2: Vertex coordinates array for mesh 2 (Mx3)
-        
-        Returns:
-            tuple: (merged_faces, merged_vertices) where faces are re-indexed
-        """
-        # Handle empty meshes
-        if v1.size == 0:
-            return f2.copy(), v2.copy()
-        
-        if v2.size == 0:
-            return f1.copy(), v1.copy()
-        
-        # Convert to numpy arrays if needed
-        f1 = np.asarray(f1, dtype=np.int32)
-        v1 = np.asarray(v1, dtype=np.float32)
-        f2 = np.asarray(f2, dtype=np.int32)
-        v2 = np.asarray(v2, dtype=np.float32)
-        
-        nrofvertices1 = v1.shape[0]
-        nrofvertices2 = v2.shape[0]
-        
-        # Adjust f2 indices by number of vertices in v1
-        f2 = f2 + nrofvertices1
-        
-        # Find overlapping vertex region
-        minv1 = np.min(v1, axis=0)
-        maxv1 = np.max(v1, axis=0)
-        minv2 = np.min(v2, axis=0)
-        maxv2 = np.max(v2, axis=0)
-        
-        ovmin = np.maximum(minv1, minv2)
-        ovmax = np.minimum(maxv1, maxv2)
-        
-        # Find vertices in overlap zone for v1
-        mask1 = ((v1[:, 0] >= ovmin[0]) & (v1[:, 0] <= ovmax[0]) &
-                (v1[:, 1] >= ovmin[1]) & (v1[:, 1] <= ovmax[1]) &
-                (v1[:, 2] >= ovmin[2]) & (v1[:, 2] <= ovmax[2]))
-        ov1_indices = np.where(mask1)[0]
-        
-        # Find vertices in overlap zone for v2
-        mask2 = ((v2[:, 0] >= ovmin[0]) & (v2[:, 0] <= ovmax[0]) &
-                (v2[:, 1] >= ovmin[1]) & (v2[:, 1] <= ovmax[1]) &
-                (v2[:, 2] >= ovmin[2]) & (v2[:, 2] <= ovmax[2]))
-        ov2_indices = np.where(mask2)[0]
-        
-        # If no overlap, concatenate meshes
-        if ov2_indices.size == 0:
-            f = np.vstack([f1, f2])
-            v = np.vstack([v1, v2])
+        def merge_meshes(f1, v1, f2, v2):
+            """
+            Merge two meshes defined by (f1, v1) and (f2, v2).
+            
+            Merges meshes by identifying and merging duplicate vertices in the overlapping region,
+            then re-indexing face indices appropriately.
+            
+            Args:
+                f1: Face indices array for mesh 1 (Nx3)
+                v1: Vertex coordinates array for mesh 1 (Mx3)
+                f2: Face indices array for mesh 2 (Nx3)
+                v2: Vertex coordinates array for mesh 2 (Mx3)
+            
+            Returns:
+                tuple: (merged_faces, merged_vertices) where faces are re-indexed
+            """
+            # Handle empty meshes
+            if v1.size == 0:
+                return f2.copy(), v2.copy()
+            
+            if v2.size == 0:
+                return f1.copy(), v1.copy()
+            
+            # Convert to numpy arrays if needed
+            f1 = np.asarray(f1, dtype=np.int32)
+            v1 = np.asarray(v1, dtype=np.float32)
+            f2 = np.asarray(f2, dtype=np.int32)
+            v2 = np.asarray(v2, dtype=np.float32)
+            
+            nrofvertices1 = v1.shape[0]
+            nrofvertices2 = v2.shape[0]
+            
+            # Adjust f2 indices by number of vertices in v1
+            f2 = f2 + nrofvertices1
+            
+            # Find overlapping vertex region
+            minv1 = np.min(v1, axis=0)
+            maxv1 = np.max(v1, axis=0)
+            minv2 = np.min(v2, axis=0)
+            maxv2 = np.max(v2, axis=0)
+            
+            ovmin = np.maximum(minv1, minv2)
+            ovmax = np.minimum(maxv1, maxv2)
+            
+            # Find vertices in overlap zone for v1
+            mask1 = ((v1[:, 0] >= ovmin[0]) & (v1[:, 0] <= ovmax[0]) &
+                    (v1[:, 1] >= ovmin[1]) & (v1[:, 1] <= ovmax[1]) &
+                    (v1[:, 2] >= ovmin[2]) & (v1[:, 2] <= ovmax[2]))
+            ov1_indices = np.where(mask1)[0]
+            
+            # Find vertices in overlap zone for v2
+            mask2 = ((v2[:, 0] >= ovmin[0]) & (v2[:, 0] <= ovmax[0]) &
+                    (v2[:, 1] >= ovmin[1]) & (v2[:, 1] <= ovmax[1]) &
+                    (v2[:, 2] >= ovmin[2]) & (v2[:, 2] <= ovmax[2]))
+            ov2_indices = np.where(mask2)[0]
+            
+            # If no overlap, concatenate meshes
+            if ov2_indices.size == 0:
+                f = np.vstack([f1, f2])
+                v = np.vstack([v1, v2])
+                return f, v
+            
+            # Find matching vertices in overlapping regions
+            deletevertex = np.zeros(nrofvertices2, dtype=bool)
+            
+            # Use faster loopless version with intersect equivalent
+            # Find common vertices in overlap zones
+            ov1_verts = v1[ov1_indices]
+            ov2_verts = v2[ov2_indices]
+            
+            # Find intersecting vertices (common coordinates)
+            common_rows = []
+            i1a_list = []
+            i2a_list = []
+            
+            for i, v_ov1_idx in enumerate(ov1_indices):
+                v_ov1 = v1[v_ov1_idx]
+                # Check if this vertex exists in ov2
+                for j, v_ov2_idx in enumerate(ov2_indices):
+                    v_ov2 = v2[v_ov2_idx]
+                    if np.allclose(v_ov1, v_ov2, atol=1e-6):
+                        i1a_list.append(v_ov1_idx)
+                        i2a_list.append(v_ov2_idx)
+                        common_rows.append(v_ov1)
+                        break
+            
+            # Link duplicate vertices
+            if len(i2a_list) > 0:
+                i1a = np.array(i1a_list, dtype=np.int32)
+                i2a = np.array(i2a_list, dtype=np.int32)
+                
+                # Remap f2 to use v1 vertices for common vertices
+                aov2 = i2a
+                kov2 = aov2 + nrofvertices1
+                
+                # For each face in f2, replace vertices that match
+                for idx in range(len(aov2)):
+                    v1_idx = i1a[idx]
+                    v2_idx = kov2[idx]
+                    # Replace all occurrences of v2_idx in f2 with v1_idx
+                    f2[f2 == v2_idx] = v1_idx
+                    deletevertex[aov2[idx]] = True
+            
+            # Re-index faces in f2 to account for deleted vertices
+            z = np.arange(nrofvertices1, dtype=np.int32)
+            z = np.append(z, np.zeros(nrofvertices2, dtype=np.int32))
+            
+            zp = nrofvertices1
+            for sp in range(nrofvertices2):
+                if not deletevertex[sp]:
+                    z[nrofvertices1 + sp] = zp
+                    zp += 1
+            
+            f2d = z[f2]
+            
+            # Ensure f2d is 2D array
+            if f2d.ndim == 1:
+                f2d = f2d.reshape(1, -1)
+            
+            # Delete unused vertices from v2 and concatenate
+            v2d = v2[~deletevertex]
+            
+            f = np.vstack([f1, f2d])
+            v = np.vstack([v1, v2d])
+            
             return f, v
-        
-        # Find matching vertices in overlapping regions
-        deletevertex = np.zeros(nrofvertices2, dtype=bool)
-        
-        # Use faster loopless version with intersect equivalent
-        # Find common vertices in overlap zones
-        ov1_verts = v1[ov1_indices]
-        ov2_verts = v2[ov2_indices]
-        
-        # Find intersecting vertices (common coordinates)
-        common_rows = []
-        i1a_list = []
-        i2a_list = []
-        
-        for i, v_ov1_idx in enumerate(ov1_indices):
-            v_ov1 = v1[v_ov1_idx]
-            # Check if this vertex exists in ov2
-            for j, v_ov2_idx in enumerate(ov2_indices):
-                v_ov2 = v2[v_ov2_idx]
-                if np.allclose(v_ov1, v_ov2, atol=1e-6):
-                    i1a_list.append(v_ov1_idx)
-                    i2a_list.append(v_ov2_idx)
-                    common_rows.append(v_ov1)
-                    break
-        
-        # Link duplicate vertices
-        if len(i2a_list) > 0:
-            i1a = np.array(i1a_list, dtype=np.int32)
-            i2a = np.array(i2a_list, dtype=np.int32)
-            
-            # Remap f2 to use v1 vertices for common vertices
-            aov2 = i2a
-            kov2 = aov2 + nrofvertices1
-            
-            # For each face in f2, replace vertices that match
-            for idx in range(len(aov2)):
-                v1_idx = i1a[idx]
-                v2_idx = kov2[idx]
-                # Replace all occurrences of v2_idx in f2 with v1_idx
-                f2[f2 == v2_idx] = v1_idx
-                deletevertex[aov2[idx]] = True
-        
-        # Re-index faces in f2 to account for deleted vertices
-        z = np.arange(nrofvertices1, dtype=np.int32)
-        z = np.append(z, np.zeros(nrofvertices2, dtype=np.int32))
-        
-        zp = nrofvertices1
-        for sp in range(nrofvertices2):
-            if not deletevertex[sp]:
-                z[nrofvertices1 + sp] = zp
-                zp += 1
-        
-        f2d = z[f2]
-        
-        # Ensure f2d is 2D array
-        if f2d.ndim == 1:
-            f2d = f2d.reshape(1, -1)
-        
-        # Delete unused vertices from v2 and concatenate
-        v2d = v2[~deletevertex]
-        
-        f = np.vstack([f1, f2d])
-        v = np.vstack([v1, v2d])
-        
-        return f, v
 
-    def vertface2obj_mtllink_invnormal(v, f, filename, objectname, mtlfilename, materialname):
-        """
-        Saves mesh as OBJ with inverted normals (flipped winding order).
-        """
-        with open(filename, 'w') as fid:
-            fid.write(f"mtllib {mtlfilename}\n")
-            fid.write(f"usemtl {materialname}\n")
-            
-            # Write vertices
-            for row in v:
-                fid.write(f"v {row[0]:f} {row[1]:f} {row[2]:f}\n")
+        def vertface2obj_mtllink_invnormal(v, f, filename, objectname, mtlfilename, materialname):
+            """
+            Saves mesh as OBJ with inverted normals (flipped winding order).
+            """
+            with open(filename, 'w') as fid:
+                fid.write(f"mtllib {mtlfilename}\n")
+                fid.write(f"usemtl {materialname}\n")
                 
-            fid.write(f"g {objectname}\n")
-            
-            # Write faces with flipped order: f(i,2), f(i,1), f(i,3)
-            # Note: assuming f contains 1-based indices
-            for row in f:
-                fid.write(f"f {int(row[1])} {int(row[0])} {int(row[2])}\n")
+                # Write vertices
+                for row in v:
+                    fid.write(f"v {row[0]:f} {row[1]:f} {row[2]:f}\n")
+                    
+                fid.write(f"g {objectname}\n")
                 
-            fid.write("g\n")
+                # Write faces with flipped order: f(i,2), f(i,1), f(i,3)
+                # Note: assuming f contains 1-based indices
+                for row in f:
+                    fid.write(f"f {int(row[1])} {int(row[0])} {int(row[2])}\n")
+                    
+                fid.write("g\n")
 
-    def vertface2obj_mtllink(v, f, filename, objectname, mtlfilename, materialname):
-        """
-        Saves mesh as OBJ with standard winding order.
-        """
-        with open(filename, 'w') as fid:
-            # Header
-            fid.write(f"mtllib {mtlfilename}\n")
-            fid.write(f"usemtl {materialname}\n")
-            
-            # Write all vertices efficiently
-            # Creates a single large string block for all vertices
-            v_lines = "".join(f"v {row[0]:f} {row[1]:f} {row[2]:f}\n" for row in v)
-            fid.write(v_lines)
-            
-            fid.write(f"g {objectname}\n")
-            
-            # Write all faces efficiently
-            # Note: assuming f contains 1-based indices
-            f_lines = "".join(f"f {int(row[0])} {int(row[1])} {int(row[2])}\n" for row in f)
-            fid.write(f_lines)
-            
-            fid.write("g\n")
-
-    def export_skeleton(self.vast, anno_object_id, output_file=None):
-        """
-        Export skeleton as SWC or OBJ line mesh.
-        
-        Returns: (nodes, edges) where nodes has columns [id, x, y, z, radius, parent_id]
-        """
-        
-        info = self.vast.get_info()
-        if not info:
-            return None
-        
-        # Select the annotation object
-        if not self.vast.set_selected_anno_object_nr(anno_object_id):
-            print(f"Failed to select annotation object {anno_object_id}")
-            return None
-        
-        # Get node data
-        node_data = self.vast.get_ao_node_data()
-        if node_data is None:
-            print("Failed to get node data")
-            return None
-        
-        # Extract and scale coordinates
-        scale = np.array([info['voxelsizex'], info['voxelsizey'], info['voxelsizez']])
-        
-        # Build node list: [id, x, y, z, radius, parent_id]
-        nodes = []
-        for i in range(len(node_data)):
-            node_id = int(node_data[i, 0])
-            x = node_data[i, 12] * scale[0]
-            y = node_data[i, 13] * scale[1]
-            # Z coordinate needs to be extracted separately if stored
-            z = 0  # You may need to get Z from anchorpoint or object data
-            radius = node_data[i, 11]
-            parent_id = int(node_data[i, 5])  # parent index
-            
-            nodes.append([node_id, x, y, z, radius, parent_id])
-        
-        nodes = np.array(nodes)
-        
-        # Build edge list
-        edges = []
-        for i in range(len(nodes)):
-            parent_idx = int(nodes[i, 5])
-            if parent_idx >= 0 and parent_idx < len(nodes):
-                edges.append([i, parent_idx])
-        
-        if output_file:
-            if output_file.endswith('.swc'):
-                save_swc(output_file, nodes)
-            elif output_file.endswith('.obj'):
-                save_skeleton_obj(output_file, nodes, edges)
-            print(f"Saved {output_file}")
-        
-        return nodes, edges
-
-    def save_obj(filename, vertices, faces):
-        """Save mesh as Wavefront OBJ."""
-        with open(filename, 'w') as f:
-            for v in vertices:
-                f.write(f"v {v[0]} {v[1]} {v[2]}\n")
-            for face in faces:
-                f.write(f"f {face[0]+1} {face[1]+1} {face[2]+1}\n")
-
-    def save_material_file(filename, material_name, color, alpha, roughness=0.5):
-        """Save MTL (material) file for OBJ."""
-        with open(filename, 'w') as f:
-            f.write(f"newmtl {material_name}\n")
-            f.write(f"Ka {color[0]:.3f} {color[1]:.3f} {color[2]:.3f}\n")  # Ambient
-            f.write(f"Kd {color[0]:.3f} {color[1]:.3f} {color[2]:.3f}\n")  # Diffuse
-            f.write(f"Ks 0.5 0.5 0.5\n")  # Specular
-            f.write(f"d {alpha:.3f}\n")  # Transparency
-            f.write(f"Ns 32\n")  # Shininess
-
-    def save_skeleton_obj(filename, nodes, edges):
-        """Save skeleton as OBJ line mesh."""
-        with open(filename, 'w') as f:
-            # Write vertices
-            for node in nodes:
-                f.write(f"v {node[1]} {node[2]} {node[3]}\n")
-            
-            # Write edges as lines
-            for edge in edges:
-                f.write(f"l {edge[0]+1} {edge[1]+1}\n")
-
-    def save_swc(filename, nodes):
-        """Save skeleton in SWC format (standard neuron format)."""
-        with open(filename, 'w') as f:
-            f.write("# SWC format skeleton\n")
-            f.write("# id type x y z radius parent\n")
-            for node in nodes:
-                node_id = int(node[0]) + 1  # SWC uses 1-based
-                parent_id = int(node[5]) + 1 if node[5] >= 0 else -1
-                f.write(f"{node_id} 0 {node[1]:.3f} {node[2]:.3f} {node[3]:.3f} {node[4]:.3f} {parent_id}\n")
-
-    def save_stl(filename, vertices, faces):
-        """Save mesh as binary STL."""
-        import struct
-        
-        with open(filename, 'wb') as f:
-            f.write(b'\0' * 80)
-            f.write(struct.pack('<I', len(faces)))
-            
-            for face in faces:
-                v0, v1, v2 = vertices[face]
-                normal = np.cross(v1 - v0, v2 - v0)
-                normal = normal / (np.linalg.norm(normal) + 1e-10)
+        def vertface2obj_mtllink(v, f, filename, objectname, mtlfilename, materialname):
+            """
+            Saves mesh as OBJ with standard winding order.
+            """
+            with open(filename, 'w') as fid:
+                # Header
+                fid.write(f"mtllib {mtlfilename}\n")
+                fid.write(f"usemtl {materialname}\n")
                 
-                f.write(struct.pack('<3f', *normal))
-                f.write(struct.pack('<3f', *v0))
-                f.write(struct.pack('<3f', *v1))
-                f.write(struct.pack('<3f', *v2))
-                f.write(struct.pack('<H', 0))
+                # Write all vertices efficiently
+                # Creates a single large string block for all vertices
+                v_lines = "".join(f"v {row[0]:f} {row[1]:f} {row[2]:f}\n" for row in v)
+                fid.write(v_lines)
+                
+                fid.write(f"g {objectname}\n")
+                
+                # Write all faces efficiently
+                # Note: assuming f contains 1-based indices
+                f_lines = "".join(f"f {int(row[0])} {int(row[1])} {int(row[2])}\n" for row in f)
+                fid.write(f_lines)
+                
+                fid.write("g\n")
+
+        def export_skeleton(anno_object_id, output_file=None):
+            """
+            Export skeleton as SWC or OBJ line mesh.
+            
+            Returns: (nodes, edges) where nodes has columns [id, x, y, z, radius, parent_id]
+            """
+            
+            info = self.vast.get_info()
+            if not info:
+                return None
+            
+            # Select the annotation object
+            if not self.vast.set_selected_anno_object_nr(anno_object_id):
+                print(f"Failed to select annotation object {anno_object_id}")
+                return None
+            
+            # Get node data
+            node_data = self.vast.get_ao_node_data()
+            if node_data is None:
+                print("Failed to get node data")
+                return None
+            
+            # Extract and scale coordinates
+            scale = np.array([info['voxelsizex'], info['voxelsizey'], info['voxelsizez']])
+            
+            # Build node list: [id, x, y, z, radius, parent_id]
+            nodes = []
+            for i in range(len(node_data)):
+                node_id = int(node_data[i, 0])
+                x = node_data[i, 12] * scale[0]
+                y = node_data[i, 13] * scale[1]
+                # Z coordinate needs to be extracted separately if stored
+                z = 0  # You may need to get Z from anchorpoint or object data
+                radius = node_data[i, 11]
+                parent_id = int(node_data[i, 5])  # parent index
+                
+                nodes.append([node_id, x, y, z, radius, parent_id])
+            
+            nodes = np.array(nodes)
+            
+            # Build edge list
+            edges = []
+            for i in range(len(nodes)):
+                parent_idx = int(nodes[i, 5])
+                if parent_idx >= 0 and parent_idx < len(nodes):
+                    edges.append([i, parent_idx])
+            
+            if output_file:
+                if output_file.endswith('.swc'):
+                    save_swc(output_file, nodes)
+                elif output_file.endswith('.obj'):
+                    save_skeleton_obj(output_file, nodes, edges)
+                print(f"Saved {output_file}")
+            
+            return nodes, edges
+
+        def save_obj(filename, vertices, faces):
+            """Save mesh as Wavefront OBJ."""
+            with open(filename, 'w') as f:
+                for v in vertices:
+                    f.write(f"v {v[0]} {v[1]} {v[2]}\n")
+                for face in faces:
+                    f.write(f"f {face[0]+1} {face[1]+1} {face[2]+1}\n")
+
+        def save_material_file(filename, material_name, color, alpha, roughness=0.5):
+            """Save MTL (material) file for OBJ."""
+            with open(filename, 'w') as f:
+                f.write(f"newmtl {material_name}\n")
+                f.write(f"Ka {color[0]:.3f} {color[1]:.3f} {color[2]:.3f}\n")  # Ambient
+                f.write(f"Kd {color[0]:.3f} {color[1]:.3f} {color[2]:.3f}\n")  # Diffuse
+                f.write(f"Ks 0.5 0.5 0.5\n")  # Specular
+                f.write(f"d {alpha:.3f}\n")  # Transparency
+                f.write(f"Ns 32\n")  # Shininess
+
+        def save_skeleton_obj(filename, nodes, edges):
+            """Save skeleton as OBJ line mesh."""
+            with open(filename, 'w') as f:
+                # Write vertices
+                for node in nodes:
+                    f.write(f"v {node[1]} {node[2]} {node[3]}\n")
+                
+                # Write edges as lines
+                for edge in edges:
+                    f.write(f"l {edge[0]+1} {edge[1]+1}\n")
+
+        def save_swc(filename, nodes):
+            """Save skeleton in SWC format (standard neuron format)."""
+            with open(filename, 'w') as f:
+                f.write("# SWC format skeleton\n")
+                f.write("# id type x y z radius parent\n")
+                for node in nodes:
+                    node_id = int(node[0]) + 1  # SWC uses 1-based
+                    parent_id = int(node[5]) + 1 if node[5] >= 0 else -1
+                    f.write(f"{node_id} 0 {node[1]:.3f} {node[2]:.3f} {node[3]:.3f} {node[4]:.3f} {parent_id}\n")
+
+        def save_stl(filename, vertices, faces):
+            """Save mesh as binary STL."""
+            import struct
+            
+            with open(filename, 'wb') as f:
+                f.write(b'\0' * 80)
+                f.write(struct.pack('<I', len(faces)))
+                
+                for face in faces:
+                    v0, v1, v2 = vertices[face]
+                    normal = np.cross(v1 - v0, v2 - v0)
+                    normal = normal / (np.linalg.norm(normal) + 1e-10)
+                    
+                    f.write(struct.pack('<3f', *normal))
+                    f.write(struct.pack('<3f', *v0))
+                    f.write(struct.pack('<3f', *v1))
+                    f.write(struct.pack('<3f', *v2))
+                    f.write(struct.pack('<H', 0))
 
 def main():
     vast = VASTControlClass()
@@ -1379,13 +1579,13 @@ def main():
 
     vast.disconnect()
 
-        region_params = {
-        'xmin': 0,
-        'xmax': info['datasizex'] - 1,
-        'ymin': 0,
-        'ymax': info['datasizey'] - 1,
-        'zmin': 0,
-        'zmax': info['datasizez'] - 1,
+    region_params = {
+    'xmin': 0,
+    'xmax': info['datasizex'] - 1,
+    'ymin': 0,
+    'ymax': info['datasizey'] - 1,
+    'zmin': 0,
+    'zmax': info['datasizez'] - 1,
     }
 
     export_params = {     
@@ -1434,6 +1634,7 @@ def main():
         'fileformat': 1,  # 1=OBJ/MTL, 2=PLY
         'includefoldernames': True,
         'objectcolors': 1,  # 1=VAST colors, 2=volume-based colormap
+        'max_object_number': 1000000,
         
         # Advanced
         'skipmodelgeneration': False,

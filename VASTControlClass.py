@@ -721,7 +721,7 @@ class VASTControlClass:
         payload = self._encode_uint32(code) + self._encode_uint32(1 if enabled else 0)
         msg_type, data = self.send_command(SETERRORPOPUPSENABLED, payload)
 
-        if msg_type == 0:
+        if msg_type == 1:
             self.last_error = 0
             return True
         else:

@@ -2588,17 +2588,19 @@ class VASTControlClass:
 
         return enabled, res
 
-    def set_error_popups_enabled(self, enabled: int) -> int:
+    def set_error_popups_enabled(self, code: int = 0, enabled: bool = True) -> int:
         """
         Set error popups enabled status.
 
         Args:
-            enabled: Enable flag (1 or 0)
+            code: Error code (default 0 for all errors)
+            enabled: Enable flag (True/False or 1/0)
 
         Returns:
             Result code (1 if success, 0 if failed)
         """
-        message = self._bytes_from_uint32([0, enabled])
+        enabled_int = 1 if enabled else 0
+        message = self._bytes_from_uint32([code, enabled_int])
         self._send_message(self.SETERRORPOPUPSENABLED, message)
         self._read_data_block()
         self._parse(self.indata)

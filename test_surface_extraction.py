@@ -18,7 +18,7 @@ def test_surface_extraction():
         'blocksizex': 128,
         'blocksizey': 128,
         'blocksizez': 64,
-        'overlap': 2,
+        'overlap': 1,
         'slicestep': 1,
         'xunit': 5.0,            # Voxel size in nm
         'yunit': 5.0,
@@ -32,7 +32,7 @@ def test_surface_extraction():
         'closesurfaces': 1,
         'invertz': 0,
         'includefoldernames': 0,
-        'disablenetwarnings': 1,
+        'disablenetwarnings': 0,
         'erodedilate': 0,
         'usemipregionconstraint': 0,
         'outputoffsetx': 0,
@@ -50,7 +50,7 @@ def test_surface_extraction():
         'ymin': 0,
         'ymax': 2713,
         'zmin': 0,
-        'zmax': 20,
+        'zmax': 119,
     }
     
     # Create output directory

@@ -6,7 +6,7 @@ import re
 from typing import Tuple, List, Dict, Optional
 import time
 import logging
-from VASTControlClass import VASTControlClass
+from VCC import VASTControlClass
 
 class SurfaceExtractor:
     """
@@ -925,14 +925,20 @@ class SurfaceExtractor:
                             bbx_int = bbx.astype(int) - 1  # MATLAB is 1-indexed
                             subseg = seg_image[bbx_int[0]:bbx_int[3]+1, bbx_int[1]:bbx_int[4]+1, bbx_int[2]:bbx_int[5]+1]
                             subseg = (subseg == seg).astype(float)
-                            
+
+                            # Transpose to MATLAB's (Y, X, Z) convention before marching cubes
+                            subseg = np.transpose(subseg, (1, 0, 2))
+
                             # Extract isosurface using marching cubes
                             try:
                                 verts, faces, normals, values_mc = measure.marching_cubes(subseg, level=0.5)
-                                
+
                                 if len(verts) > 0:
-                                    # Adjust coordinates for bounding box offset
-                                    # Marching cubes returns verts in same order as input array: (X, Y, Z)
+                                    # marching_cubes output is now in (Y, X, Z) order
+                                    # Swap columns 0 and 1 to get back to (X, Y, Z)
+                                    verts[:, [0, 1]] = verts[:, [1, 0]]
+
+                                    # Adjust coordinates for bounding box offset (now in X, Y, Z order)
                                     verts[:, 0] += bbx_int[0] + x_vofs  # X offset
                                     verts[:, 1] += bbx_int[1] + y_vofs  # Y offset
                                     verts[:, 2] += bbx_int[2] + z_vofs  # Z offset
@@ -1070,19 +1076,26 @@ class SurfaceExtractor:
                                 
                                 # Create binary mask for this color
                                 subseg = (col_cube == color).astype(float)
-                                
+
                                 # Skip if dimensions are invalid
                                 if subseg.ndim != 3:
                                     continue
                                 if np.sum(subseg) == 0 or np.sum(subseg) == subseg.size:
                                     # All zeros or all ones - skip
                                     continue
-                                
+
+                                # Transpose to MATLAB's (Y, X, Z) convention before marching cubes
+                                subseg = np.transpose(subseg, (1, 0, 2))
+
                                 # Extract isosurface
                                 try:
                                     verts, faces, normals, values_mc = measure.marching_cubes(subseg, level=0.5)
-                                    
+
                                     if len(verts) > 0:
+                                        # marching_cubes output is now in (Y, X, Z) order
+                                        # Swap columns 0 and 1 to get back to (X, Y, Z)
+                                        verts[:, [0, 1]] = verts[:, [1, 0]]
+
                                         # Adjust coordinates (X, Y, Z)
                                         verts[:, 0] += x_vofs
                                         verts[:, 1] += y_vofs
@@ -1144,12 +1157,19 @@ class SurfaceExtractor:
                                 # Skip if dimensions are invalid
                                 if subseg.ndim != 3:
                                     continue
-                                
+
+                                # Transpose to MATLAB's (Y, X, Z) convention before marching cubes
+                                subseg = np.transpose(subseg, (1, 0, 2))
+
                                 # Extract isosurface
                                 try:
                                     verts, faces, normals, values_mc = measure.marching_cubes(subseg, level=0.5)
-                                    
+
                                     if len(verts) > 0:
+                                        # marching_cubes output is now in (Y, X, Z) order
+                                        # Swap columns 0 and 1 to get back to (X, Y, Z)
+                                        verts[:, [0, 1]] = verts[:, [1, 0]]
+
                                         # Adjust coordinates (X, Y, Z)
                                         verts[:, 0] += x_vofs
                                         verts[:, 1] += y_vofs
@@ -1255,9 +1275,11 @@ class SurfaceExtractor:
 
             # Merge plane into final mesh
             if plane_v is not None and len(plane_v) > 0:
-                if tz == 0:
+                if final_v is None:
+                    # First plane with data
                     final_f, final_v = plane_f, plane_v
                 else:
+                    # Merge with existing data
                     final_f, final_v = self._merge_meshes(final_f, final_v, plane_f, plane_v)
 
                     # OPTIMIZATION: Extract completed portion (MATLAB lines 879-888)
@@ -1460,10 +1482,19 @@ class SurfaceExtractor:
         Returns:
             tuple: (merged_faces, merged_vertices) where faces are re-indexed
         """
+        # Handle None inputs
+        if v1 is None or f1 is None:
+            if v2 is None or f2 is None:
+                return np.array([]), np.array([])
+            return f2.copy() if hasattr(f2, 'copy') else f2, v2.copy() if hasattr(v2, 'copy') else v2
+
+        if v2 is None or f2 is None:
+            return f1.copy() if hasattr(f1, 'copy') else f1, v1.copy() if hasattr(v1, 'copy') else v1
+
         # Handle empty meshes
         if v1.size == 0:
             return f2.copy(), v2.copy()
-        
+
         if v2.size == 0:
             return f1.copy(), v1.copy()
         

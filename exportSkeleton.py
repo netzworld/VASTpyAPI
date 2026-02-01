@@ -6,7 +6,7 @@ import re
 from typing import Tuple, List, Dict, Optional
 import time
 import logging
-from VASTControlClass2 import VASTControlClass
+from VASTControlClass import VASTControlClass
 
 class SurfaceExtractor:
     """
@@ -119,11 +119,12 @@ class SurfaceExtractor:
         Args:
             params: Dictionary with export parameters
         """
-        self.vast = VASTControlClass()
-        if not self.vast.connect():
-            print("Failed to connect")
+        # Use the VAST instance passed in constructor (already connected)
+        # Don't create a new connection
+        if not self.vast:
+            print("ERROR: No VAST connection provided")
             return None
-        
+
         if self.export_params.get('disablenetwarnings', 0) == 1:
             self.vast.set_error_popups_enabled(74, False)  # network connection error
             self.vast.set_error_popups_enabled(75, False)  # unexpected data
@@ -270,6 +271,10 @@ class SurfaceExtractor:
             'mipfacty': mip_fact_y,
             'mipfactz': mip_fact_z
         }
+
+        # Update param to reference self.param so local variable has all keys
+        param = self.param
+
         objects = None
 
         if extract_seg:
@@ -277,6 +282,17 @@ class SurfaceExtractor:
             self.param['max_object_number'] = max_object_number
             self.param['mip_data_size'] = mip_data_size
             self.param['seg_layer_name'] = seg_layer_name
+
+            # Create mapping from segment ID to name for export_meshes
+            # data[:, 0] contains segment IDs, names array corresponds to rows
+            self.seg_id_to_name = {}
+            if len(names) > 0 and len(data) > 0:
+                for i, row in enumerate(data):
+                    seg_id = int(row[0])
+                    if i < len(names):
+                        self.seg_id_to_name[seg_id] = names[i]
+                    else:
+                        self.seg_id_to_name[seg_id] = f"Segment_{seg_id}"
         
         print(f"Initialization complete. Extract mode: {'segmentation' if extract_seg else 'screenshots'}")
 
@@ -562,7 +578,7 @@ class SurfaceExtractor:
 
         if extract_seg:
             # Storage for segmentation objects
-            max_obj_num = param['max_object_number']
+            max_obj_num = self.param['max_object_number']
 
             param['farray'] = {}
             param['varray'] = {}
@@ -692,7 +708,7 @@ class SurfaceExtractor:
                         
                         # Load segmentation data
                         slice_step = param.get('slicestep', 1)
-                        max_object_number = param.get('max_object_number', 0)
+                        max_object_number = self.param.get('max_object_number', 0)
                         
                         if slice_step == 1:
                             seg_image, values, numbers, bboxes = self.vast.get_seg_image_rle_decoded_bboxes(
@@ -916,22 +932,23 @@ class SurfaceExtractor:
                                 
                                 if len(verts) > 0:
                                     # Adjust coordinates for bounding box offset
-                                    verts[:, 0] += bbx_int[1] + y_vofs  # Y in MATLAB order
-                                    verts[:, 1] += bbx_int[0] + x_vofs  # X in MATLAB order
-                                    verts[:, 2] += bbx_int[2] + z_vofs  # Z
-                                    
+                                    # Marching cubes returns verts in same order as input array: (X, Y, Z)
+                                    verts[:, 0] += bbx_int[0] + x_vofs  # X offset
+                                    verts[:, 1] += bbx_int[1] + y_vofs  # Y offset
+                                    verts[:, 2] += bbx_int[2] + z_vofs  # Z offset
+
                                     # Adjust for tile position
-                                    verts[:, 0] += tile_y1
-                                    verts[:, 1] += tile_x1
-                                    
+                                    verts[:, 0] += tile_x1  # X tile position
+                                    verts[:, 1] += tile_y1  # Y tile position
+
                                     if slice_step == 1:
                                         verts[:, 2] += tile_z1
                                     else:
                                         verts[:, 2] = ((verts[:, 2] - 0.5) * slice_step) + 0.5 + first_block_slice
-                                    
+
                                     # Scale to physical units
-                                    verts[:, 0] *= param.get('yscale', 1.0) * param.get('yunit', 1.0) * param['mipfacty']
-                                    verts[:, 1] *= param.get('xscale', 1.0) * param.get('xunit', 1.0) * param['mipfactx']
+                                    verts[:, 0] *= param.get('xscale', 1.0) * param.get('xunit', 1.0) * param['mipfactx']
+                                    verts[:, 1] *= param.get('yscale', 1.0) * param.get('yunit', 1.0) * param['mipfacty']
                                     verts[:, 2] *= param.get('zscale', 1.0) * param.get('zunit', 1.0) * param['mipfactz']
 
                                     # Track volume for this segment
@@ -1066,24 +1083,24 @@ class SurfaceExtractor:
                                     verts, faces, normals, values_mc = measure.marching_cubes(subseg, level=0.5)
                                     
                                     if len(verts) > 0:
-                                        # Adjust coordinates
-                                        verts[:, 0] += y_vofs
-                                        verts[:, 1] += x_vofs
+                                        # Adjust coordinates (X, Y, Z)
+                                        verts[:, 0] += x_vofs
+                                        verts[:, 1] += y_vofs
                                         verts[:, 2] += z_vofs
-                                        
-                                        verts[:, 0] += tile_y1
-                                        verts[:, 1] += tile_x1
-                                        
+
+                                        verts[:, 0] += tile_x1
+                                        verts[:, 1] += tile_y1
+
                                         if slice_step == 1:
                                             verts[:, 2] += tile_z1
                                         else:
                                             verts[:, 2] = ((verts[:, 2] - 0.5) * slice_step) + 0.5 + first_block_slice
-                                        
+
                                         # Scale to physical units
-                                        verts[:, 0] *= param.get('yscale', 1.0) * param.get('yunit', 1.0) * param['mipfacty']
-                                        verts[:, 1] *= param.get('xscale', 1.0) * param.get('xunit', 1.0) * param['mipfactx']
+                                        verts[:, 0] *= param.get('xscale', 1.0) * param.get('xunit', 1.0) * param['mipfactx']
+                                        verts[:, 1] *= param.get('yscale', 1.0) * param.get('yunit', 1.0) * param['mipfacty']
                                         verts[:, 2] *= param.get('zscale', 1.0) * param.get('zunit', 1.0) * param['mipfactz']
-                                        
+
                                         # Store with block indexing
                                         idx = tz * param['nr_y_tiles'] * param['nr_x_tiles'] + ty * param['nr_x_tiles'] + tx
                                         param['fvindex'][(int(color), idx)] = block_nr
@@ -1133,24 +1150,24 @@ class SurfaceExtractor:
                                     verts, faces, normals, values_mc = measure.marching_cubes(subseg, level=0.5)
                                     
                                     if len(verts) > 0:
-                                        # Adjust coordinates
-                                        verts[:, 0] += y_vofs
-                                        verts[:, 1] += x_vofs
+                                        # Adjust coordinates (X, Y, Z)
+                                        verts[:, 0] += x_vofs
+                                        verts[:, 1] += y_vofs
                                         verts[:, 2] += z_vofs
-                                        
-                                        verts[:, 0] += tile_y1
-                                        verts[:, 1] += tile_x1
-                                        
+
+                                        verts[:, 0] += tile_x1
+                                        verts[:, 1] += tile_y1
+
                                         if slice_step == 1:
                                             verts[:, 2] += tile_z1
                                         else:
                                             verts[:, 2] = ((verts[:, 2] - 0.5) * slice_step) + 0.5 + first_block_slice
-                                        
+
                                         # Scale to physical units
-                                        verts[:, 0] *= param.get('yscale', 1.0) * param.get('yunit', 1.0) * param['mipfacty']
-                                        verts[:, 1] *= param.get('xscale', 1.0) * param.get('xunit', 1.0) * param['mipfactx']
+                                        verts[:, 0] *= param.get('xscale', 1.0) * param.get('xunit', 1.0) * param['mipfactx']
+                                        verts[:, 1] *= param.get('yscale', 1.0) * param.get('yunit', 1.0) * param['mipfacty']
                                         verts[:, 2] *= param.get('zscale', 1.0) * param.get('zunit', 1.0) * param['mipfactz']
-                                        
+
                                         # Store faces and vertices
                                         param['farray'][(obj_idx, tx, ty, tz)] = faces
                                         param['varray'][(obj_idx, tx, ty, tz)] = verts
@@ -1366,6 +1383,12 @@ class SurfaceExtractor:
 
         param = self.param
 
+        # Verify extract_surfaces was called and completed
+        if 'objects' not in param:
+            print("ERROR: extract_surfaces() must be called before export_meshes()")
+            print("No objects found to export.")
+            return
+
         # Create output directory
         os.makedirs(param['targetfolder'], exist_ok=True)
 
@@ -1381,8 +1404,8 @@ class SurfaceExtractor:
                 break
 
             seg_id = int(seg_id)
-            print(f"Processing object {seg_nr + 1}/{total_objects}: "
-                  f"{self.names[seg_id] if seg_id < len(self.names) else seg_id}")
+            obj_name = self.seg_id_to_name.get(seg_id, f"Segment_{seg_id}")
+            print(f"Processing object {seg_nr + 1}/{total_objects}: {obj_name}")
 
             # Merge all blocks for this segment
             print("  Merging blocks...")
@@ -1396,7 +1419,7 @@ class SurfaceExtractor:
             merged_verts = self._apply_output_transforms(merged_verts, param)
 
             # Generate filenames
-            obj_name = self._sanitize_filename(self.names[seg_id])
+            obj_name_sanitized = self._sanitize_filename(obj_name)
             prefix = param.get('targetfileprefix', 'Segment_')
             obj_filename = f"{prefix}{seg_id:04d}_{obj_name}.obj"
             mtl_filename = f"{prefix}{seg_id:04d}_{obj_name}.mtl"
@@ -1479,9 +1502,12 @@ class SurfaceExtractor:
         
         # If no overlap, concatenate meshes
         if ov2_indices.size == 0:
+            print(f"    DEBUG: No overlap found. v1: {v1.shape[0]} verts, v2: {v2.shape[0]} verts")
             f = np.vstack([f1, f2])
             v = np.vstack([v1, v2])
             return f, v
+
+        print(f"    DEBUG: Overlap region - v1: {ov1_indices.size} verts, v2: {ov2_indices.size} verts")
         
         # Find matching vertices in overlapping regions
         deletevertex = np.zeros(nrofvertices2, dtype=bool)
@@ -1501,7 +1527,10 @@ class SurfaceExtractor:
             # Check if this vertex exists in ov2
             for j, v_ov2_idx in enumerate(ov2_indices):
                 v_ov2 = v2[v_ov2_idx]
-                if np.allclose(v_ov1, v_ov2, atol=1e-6):
+                # Use larger tolerance to account for floating-point precision after coordinate
+                # transformations (mipmap scaling, physical units, etc.)
+                # With mipfact=4, overlap=2, scaled coords can differ by several units
+                if np.allclose(v_ov1, v_ov2, atol=5.0):
                     i1a_list.append(v_ov1_idx)
                     i2a_list.append(v_ov2_idx)
                     common_rows.append(v_ov1)
@@ -1509,6 +1538,7 @@ class SurfaceExtractor:
         
         # Link duplicate vertices
         if len(i2a_list) > 0:
+            print(f"    DEBUG: Merged {len(i2a_list)} duplicate vertices")
             i1a = np.array(i1a_list, dtype=np.int32)
             i2a = np.array(i2a_list, dtype=np.int32)
             
@@ -1523,7 +1553,14 @@ class SurfaceExtractor:
                 # Replace all occurrences of v2_idx in f2 with v1_idx
                 f2[f2 == v2_idx] = v1_idx
                 deletevertex[aov2[idx]] = True
-        
+        else:
+            print(f"    WARNING: Overlap region found but NO vertices matched! This will cause gaps.")
+            print(f"    Overlap region: min={ovmin}, max={ovmax}")
+            if ov1_indices.size > 0 and ov2_indices.size > 0:
+                # Show a sample of distances
+                sample_dist = np.linalg.norm(v1[ov1_indices[0]] - v2[ov2_indices[0]])
+                print(f"    Sample distance between overlap verts: {sample_dist:.6f}")
+
         # Re-index faces in f2 to account for deleted vertices
         z = np.arange(nrofvertices1, dtype=np.int32)
         z = np.append(z, np.zeros(nrofvertices2, dtype=np.int32))

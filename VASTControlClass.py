@@ -558,7 +558,7 @@ class VASTControlClass:
         while p < n:
             t   = indata[p]
 
-            if t   == 1:  # int32
+            if t   == 1:  # uint32
                 if p + 5 > n:
                     break
                 val = struct.unpack("<I", indata[p+1:p+5])[0]
@@ -590,7 +590,7 @@ class VASTControlClass:
                 val = struct.unpack("<i", indata[p+1:p+5])[0]
                 ints.append(val)
                 p  += 5
-            elif t == 5: # uint64
+            elif t == 6: # uint64
                 if p + 9 > n:
                     break
                 val = struct.unpack("<Q", indata[p+1:p+9])[0]
@@ -674,16 +674,16 @@ class VASTControlClass:
         try:
             parsed = self.parse_payload(data)
 
-            u32    = parsed.get("uint32", [])
-            f64    = parsed.get("float64", [])
-            i32    = parsed.get("int32", [])
-            texts  = parsed.get("strings", [])
+            u32    = parsed.get("uints", [])
+            f64    = parsed.get("doubles", [])
+            i32    = parsed.get("ints", [])
+            texts  = parsed.get("text", [])
 
             # Expected: 1 uint, 7 doubles, 0 ints, 5 text strings
             if len(u32) != 1 or len(f64) != 7 or len(i32) != 0 or len(texts) != 5:
                 print(
                     f"Unexpected payload layout: "
-                    f"uint32={len(u32)}, float64={len(f64)}, int32={len(i32)}, strings={len(texts)}"
+                    f"uints={len(u32)}, doubles={len(f64)}, ints={len(i32)}, text={len(texts)}"
                 )
                 return {}
             
@@ -2289,24 +2289,24 @@ class VASTControlClass:
                 # Columns 10-12: anchorpoint (x, y, z)
                 # MATLAB: segdatamatrix(i,11:13)=id(sp+3:sp+5)
                 # MATLAB sp+3:sp+5 is inclusive, so 3 elements starting at sp+3
-                # In Python, this is sp+2:sp+5 (sp+2, sp+3, sp+4)
-                segdatamatrix[i, 10:13] = sid[sp + 2:sp + 5]
+                # In Python, this is sp+3:sp+6 (MATLAB sp+3:sp+5 = 3 elements)
+                segdatamatrix[i, 10:13] = sid[sp + 3:sp + 6]
                 
                 # Columns 13-16: hierarchy (parent, child1, child2, next)
                 # MATLAB: segdatamatrix(i,14:17)=uid(sp+6:sp+9)
                 # MATLAB sp+6:sp+9 is inclusive, so 4 elements
-                # In Python, this is sp+5:sp+9
-                segdatamatrix[i, 13:17] = uid[sp + 5:sp + 9]
+                # In Python, this is sp+6:sp+10 (MATLAB sp+6:sp+9 = 4 elements)
+                segdatamatrix[i, 13:17] = uid[sp + 6:sp + 10]
                 
                 # Column 17: collapsednr
                 # MATLAB: segdatamatrix(i,18)=uid(sp+10)
-                segdatamatrix[i, 17] = uid[sp + 9]
+                segdatamatrix[i, 17] = uid[sp + 10]
                 
                 # Columns 18-23: boundingbox (minx, maxx, miny, maxy, minz, maxz)
                 # MATLAB: segdatamatrix(i,19:24)=id(sp+11:sp+16)
                 # MATLAB sp+11:sp+16 is inclusive, so 6 elements
-                # In Python, this is sp+10:sp+16
-                segdatamatrix[i, 18:24] = sid[sp + 10:sp + 16]
+                # In Python, this is sp+11:sp+17 (MATLAB sp+11:sp+16 = 6 elements)
+                segdatamatrix[i, 18:24] = sid[sp + 11:sp + 17]
                 
                 # Move to next segment
                 sp += 17
@@ -2842,13 +2842,14 @@ class VASTControlClass:
                                      request_load: bool = False) -> tuple:
         """
         Get decoded RLE image with bounding boxes for each segment.
-        
+
         Returns:
             Tuple of (seg_image, values, counts, bboxes) where:
-            - seg_image: numpy array of shape (Y, X, Z)
+            - seg_image: numpy array of shape (X, Y, Z) matching VAST coordinate system
             - values: List of unique segment IDs
             - counts: List of voxel counts
             - bboxes: List of bounding boxes [xmin, ymin, zmin, xmax, ymax, zmax]
+                     Coordinates are 0-indexed and match seg_image dimensions
             Returns (None, [], [], []) on failure
         """
         
@@ -2927,9 +2928,10 @@ class VASTControlClass:
             
             dp += count
         
-        # Reshape image
+        # Reshape image to (X, Y, Z) - matches bbox coordinate system
         seg_image = seg_image.reshape(size_x, size_y, size_z)
-        seg_image = np.transpose(seg_image, (1, 0, 2))
+        # Note: Bboxes are in [xmin, ymin, zmin, xmax, ymax, zmax] format
+        # This ordering is consistent with the reshaped image dimensions
         
         # Extract results for non-zero segments
         nonzero_indices = np.where(counts_array > 0)[0]
